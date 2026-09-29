@@ -1,0 +1,51 @@
+# ============================================================================
+# 守望 Sentinel · 校园反霸凌智能检测系统 · 后端依赖（真实推理栈）
+#
+# 安装顺序（torch 需从官方 CUDA 源安装，故单独一步）：
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install -U pip wheel
+#   .venv\Scripts\python -m pip install torch==2.4.1 torchvision==0.19.1 ^
+#       --index-url https://download.pytorch.org/whl/cu121
+#   .venv\Scripts\python -m pip install -r requirements.txt
+#   .venv\Scripts\python -m pip uninstall -y opencv-python && ^
+#       .venv\Scripts\python -m pip install opencv-python-headless==4.10.0.84
+#
+# 说明：ultralytics 会连带安装 opencv-python，与 headless 版本冲突，
+# 因此最后一步卸载 GUI 版并换回 headless（服务器无显示环境）。
+# ============================================================================
+
+# ===== Web 框架 =====
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+websockets==13.1
+
+# ===== 数据层 =====
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+
+# ===== 鉴权与安全 =====
+python-jose[cryptography]==3.3.0
+passlib==1.7.4
+bcrypt==4.0.1              # passlib 1.7.4 与 bcrypt>=4.1 不兼容，需锁定
+email-validator==2.2.0
+
+# ===== 数值与图像 =====
+numpy==1.26.4              # torch 2.4 的 C 扩展依赖 numpy 1.x，不可升到 2.x
+scipy==1.14.1              # 跟踪的匈牙利匹配
+opencv-python-headless==4.10.0.84
+Pillow==11.0.0
+
+# ===== 视觉推理 =====
+ultralytics==8.3.40        # YOLOv8 检测 / 姿态
+# torch / torchvision 由上方 CUDA 源单独安装，此处不重复声明
+
+# ===== 语音识别 =====
+# 主链路走云端（阿里云智能语音交互 NLS），依赖仅为 websockets（上方已含）。
+# 下方 Vosk 是"无外网 / 未配云端凭据"时的本地兜底，仅在 CAB_ASR_PROVIDER=vosk 时需要：
+# vosk==0.3.45
+# 说明：Vosk 中文模型（约 42MB）在首次使用该 Provider 时自动下载到 backend/models/。
+
+# ===== 配置 =====
+pydantic==2.9.2
+pydantic-settings==2.6.1

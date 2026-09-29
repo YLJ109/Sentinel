@@ -1,0 +1,74 @@
+# ============================================================================
+# 守望 Sentinel · 版本控制忽略规则
+#
+# 原则：只提交「代码 + 文档 + 界面截图」。
+# 密钥、运行时数据、依赖、构建产物、模型权重一律不入库。
+# ============================================================================
+
+# ---------- 密钥与本地配置（最高优先级，绝不可提交）----------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+
+# ---------- 后端运行时数据 ----------
+# 含真实检测事件库、上传视频、报警剪辑、取证截图与转写，
+# 属于校园实际运行数据，不得进入任何仓库
+backend/data/
+backend/uploads/
+backend/evidence/
+backend/clips/
+*.db
+*.sqlite
+*.sqlite3
+
+# ---------- 模型权重（体积大，首次运行会自动下载到 backend/models/）----------
+backend/models/
+*.pt
+*.onnx
+*.pth
+*.caffemodel
+
+# ---------- 语音自检产物 ----------
+*.wav
+*.mp3
+
+# ---------- Python ----------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Node / 前端 ----------
+node_modules/
+frontend/dist/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 编辑器与操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+tmp/
+temp/

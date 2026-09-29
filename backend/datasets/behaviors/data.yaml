@@ -1,0 +1,25 @@
+# 自定义行为检测数据集配置（YOLO 格式）
+#
+# 目录结构：
+#   datasets/behaviors/
+#     ├── data.yaml
+#     ├── images/{train,val}/*.jpg
+#     └── labels/{train,val}/*.txt      # 每行: class_id cx cy w h（归一化 0~1）
+#
+# 采集建议：优先补充校园真实视角的样本（走廊俯拍、逆光、多人遮挡），
+# 每类建议 ≥ 800 张、正负样本比例均衡，否则模型会退化为"总是报同一类"。
+# 标注工具推荐 labelImg / Roboflow，导出 YOLO 格式。
+
+path: ./datasets/behaviors
+train: images/train
+val: images/val
+
+names:
+  0: cigarette      # 吸烟（手中夹持物）
+  1: fight          # 打架/肢体冲突
+  2: fall           # 倒地
+# 说明：类别名会被 services/alarm 按语义映射到系统行为类型
+#   cigarette/smoke/cigar -> smoke
+#   fight/violence/punch/assault/weapon -> fight
+#   fall/fallen -> fall
+# 因此新增类别时请沿用可被识别的命名，或同步扩展 vision/behaviors.py 的映射表。
