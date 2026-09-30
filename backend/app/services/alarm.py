@@ -26,6 +26,7 @@ from app.audio.keywords import KeywordHit, summarize
 from app.core.config import behavior_meta, settings
 from app.models import AlarmRecord, ChatLog, DetectionEvent, EvidenceFile, RuntimeState
 from app.services import evidence as ev
+from app.services import keyword_store
 from app.services import notify
 from app.services.clips import clip_recorder
 from app.services.state_store import state_store
@@ -273,14 +274,20 @@ async def process_speech(
     alarm_id: int | None = None
     triggered: dict[str, Any] | None = None
 
-    if level and not await _in_cooldown(camera_id, "audio"):
+    # 只有 alarm 档才触发报警。词表扩到 3000+ 后，"命中即报警"会让误报泛滥 ——
+    # "垃圾""你妈"在正常对话里也会出现。warn 档只记入对话流并做警告提示，
+    # highlight 档仅高亮，两者都不生成报警记录，由前端分级标色呈现。
+    if level == "alarm" and not await _in_cooldown(camera_id, "audio"):
+        # 档位 → 报警级别：能走到这里的只有 alarm 档，因此固定为最高级别
+        alarm_level = "high"
+
         # ---- 多模态证据融合（反向：语音报警时回查同期视觉证据）----
         visual_labels: list[str] = []
         if settings.FUSION_ENABLED:
             visual_labels = await _recent_visual_events(db, camera_id, settings.FUSION_WINDOW_SEC)
         multimodal = bool(visual_labels)
         if multimodal:
-            level = _escalate(str(level))
+            alarm_level = _escalate(alarm_level)
 
         keyword_txt = "、".join(summary["keywords"])
         reason = f"语音关键词命中：{keyword_txt}｜“{segment.text}”"
@@ -290,7 +297,7 @@ async def process_speech(
         path = ev.save_transcript(segment.text, prefix=f"speech_{int(time.time() * 1000)}")
         alarm = AlarmRecord(
             camera_id=camera_id,
-            level=str(level),
+            level=alarm_level,
             reason=reason,
             source="audio",
             status="pending",
@@ -331,6 +338,17 @@ async def process_speech(
         is_final=True,
     ))
     await db.commit()
+
+    # 命中次数统计：只统计 alarm 与 warn 两档。
+    # highlight 档词条数以千计且大多只是复核线索，把它们计入会让"命中排行"
+    # 失去参考价值 —— 排行榜应该反映"哪些词真的在起作用"。
+    tracked = [*summary["bullying"], *summary["alarm"]]
+    if tracked:
+        try:
+            await keyword_store.bump_hits(db, tracked)
+        except Exception as e:  # noqa: BLE001 —— 统计失败不应影响报警主链路
+            log.warning("关键词命中统计写入失败：%s", e)
+
     return triggered
 
 

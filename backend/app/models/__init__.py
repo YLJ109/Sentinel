@@ -97,6 +97,30 @@ class AlarmRecord(Base):
     event: Mapped["DetectionEvent | None"] = relationship(back_populates="alarms")
 
 
+class KeywordRule(Base):
+    """关键词规则（三档响应），支持增删改查与命中统计。
+
+    为什么做成表而不是配置文件：
+        学校想加一个方言词、或误报严重的词需要停用，都要改代码重启才生效；
+        而且词表命中次数无从统计，没法回答"哪些词有用、哪些词一直在制造误报"。
+    """
+    __tablename__ = "keyword_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    word: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(24), default="custom")
+    # alarm 触发报警 / warn 警告提示 / highlight 仅高亮
+    level: Mapped[str] = mapped_column(String(16), default="warn", index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 命中次数：用于反向优化词表（哪些词有用、哪些词一直在制造误报）
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 内置词允许停用但不允许删除，避免误删后无法恢复
+    is_preset: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChatLog(Base):
     """语音转写 + 关键词命中日志（取证聊天内容）。"""
     __tablename__ = "chat_logs"

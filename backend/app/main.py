@@ -15,7 +15,8 @@ from app.core.db import init_db
 from app.core.logbuffer import install as install_log_buffer
 from app.core.security import hash_password
 from app.models import Camera, User
-from app.routers import (alarms, auth, cameras, dashboard, detect, history, media, risk, system, video)
+from app.routers import (alarms, auth, cameras, dashboard, detect, history, keywords,
+                         media, risk, system, video)
 from app.vision.engine import engine
 from app.vision.registry import registry
 
@@ -44,11 +45,29 @@ async def lifespan(app: FastAPI):
     await _seed_admin()
     await _purge_demo_cameras()
     await _load_runtime_config()
+    await _seed_keywords()
     await _warmup()
     tasks = _start_background_tasks()
     yield
     for t in tasks:
         t.cancel()
+
+
+async def _seed_keywords() -> None:
+    """首次启动把内置词库灌入数据库，并载入内存缓存。
+
+    必须在 warmup 之前完成：词表为空会让关键词检测**静默失效**
+    （一条都不命中，且不报任何错），这类问题极难排查。
+    库中已有词条时 ``ensure_seeded`` 直接返回，不做全量比对。
+    """
+    from app.core.db import SessionLocal
+    from app.services import keyword_store
+
+    async with SessionLocal() as db:
+        added = await keyword_store.ensure_seeded(db)
+        count = await keyword_store.refresh(db)
+    if added:
+        log.info("关键词词库初始化完成：新增 %d 条，当前生效 %d 条", added, count)
 
 
 async def _load_runtime_config() -> None:
@@ -196,6 +215,8 @@ app.include_router(system.router)
 app.include_router(media.router)
 # 事前预警（基于历史事件的风险画像，与实时报警互补）
 app.include_router(risk.router)
+# 关键词管理（词表增删改查 + 三档响应）
+app.include_router(keywords.router)
 
 # 取证文件不再以静态目录匿名暴露，统一经 /api/media/{path} 鉴权后返回
 
