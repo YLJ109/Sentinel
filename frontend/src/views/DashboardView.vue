@@ -89,6 +89,48 @@
         </div>
       </div>
     </div>
+
+    <!-- 风险预警：事前视角。上方是"刚刚发生了什么"，这里是"哪里、什么时候最容易出事" -->
+    <div class="grid g-2 mt fade-up d3 grid-fill">
+      <div class="panel panel-fill">
+        <div class="panel-hd">
+          <span class="panel-title">风险点位预警</span>
+          <div class="spacer" />
+          <span class="panel-sub mono">近 {{ risk.window_days }} 天</span>
+        </div>
+        <div class="panel-bd" style="padding: 12px">
+          <div v-if="!risk.cameras.length" class="empty" style="padding: 30px 10px">
+            <Icon name="shield" />
+            <div class="t">近 {{ risk.window_days }} 天无霸凌类事件</div>
+          </div>
+          <ul v-else class="risk-list">
+            <li v-for="(r, i) in risk.cameras" :key="r.camera_id">
+              <span class="rank" :class="{ top: i < 3 }">{{ i + 1 }}</span>
+              <div style="min-width: 0; flex: 1">
+                <div class="ellip">{{ r.name }}</div>
+                <div class="dim tiny ellip">
+                  高发时段 {{ r.peak_hours.length ? r.peak_hours.map((h) => h + '时').join('、') : '—' }}
+                </div>
+              </div>
+              <span class="trend" :class="`trend--${r.trend}`">{{ trendZh[r.trend] }}</span>
+              <span class="score mono">{{ r.risk_score.toFixed(2) }}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="panel panel-fill">
+        <div class="panel-hd">
+          <span class="panel-title">时段风险分布</span>
+          <div class="spacer" />
+          <span class="panel-sub mono">{{ risk.total_events }} 起</span>
+        </div>
+        <div class="panel-bd">
+          <div v-if="!risk.total_events" class="empty"><Icon name="pulse" /><div class="t">暂无足够数据</div></div>
+          <div v-show="risk.total_events" ref="hoursEl" class="chart-fill" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -110,16 +152,21 @@ const stats = reactive({
 })
 const cameras = ref([])
 const alarms = ref([])
+// 事前预警：点位风险排行 + 24 小时风险分布（来自 /api/risk/forecast）
+const risk = reactive({ window_days: 14, total_events: 0, cameras: [], hours: [], trend: {} })
 const barEl = ref(null)
 const donutEl = ref(null)
+const hoursEl = ref(null)
 let bar = null
 let donut = null
+let hoursChart = null
 let timer = null
 
 const levelZh = { high: '高危', medium: '中警', low: '提示' }
 const statusZh = { pending: '待处置', handling: '处置中', resolved: '已解决', ignored: '已忽略' }
 const typeZh = { fall: '跌倒', smoke: '抽烟', bullying: '欺凌', fight: '打架', argue: '争吵', crowd: '人员聚集', person: '人员', normal: '正常' }
 const srcZh = { webcam: '本机摄像头', rtsp: 'RTSP', file: '视频文件' }
+const trendZh = { up: '↑ 上升', down: '↓ 下降', stable: '— 平稳' }
 const typeColor = { bullying: '#ff1e56', fight: '#ff4d6d', argue: '#ff8a3d', fall: '#ffb020', smoke: '#d7c341', crowd: '#9b7bff', person: '#2fd6f0' }
 
 const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '')
@@ -150,6 +197,57 @@ async function loadAux() {
     await nextTick()
     drawDonut()
   } catch { /* 静默 */ }
+}
+
+async function loadRisk() {
+  try {
+    const r = await api.get('/api/risk/forecast?days=14')
+    Object.assign(risk, r)
+    await nextTick()
+    drawHours()
+  } catch { /* 静默 */ }
+}
+
+function drawHours() {
+  if (!hoursEl.value || !risk.total_events) return
+  if (!hoursChart) hoursChart = echarts.init(hoursEl.value)
+  hoursChart.setOption({
+    backgroundColor: 'transparent',
+    grid: { left: 6, right: 14, top: 20, bottom: 4, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#111a2a',
+      borderColor: 'rgba(122,162,220,.28)',
+      textStyle: { color: '#e8f0fc', fontSize: 12 },
+      formatter: (p) => `${p[0].axisValue} 时<br/>事件 ${p[0].data} 起`
+    },
+    xAxis: {
+      type: 'category',
+      data: risk.hours.map((h) => h.hour),
+      axisLine: { lineStyle: { color: 'rgba(122,162,220,.2)' } },
+      axisTick: { show: false },
+      // 24 个刻度全部显示会挤在一起，隔 2 个标一个
+      axisLabel: { color: '#8fa0bd', fontSize: 10, interval: 2 }
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      splitLine: { lineStyle: { color: 'rgba(122,162,220,.09)' } },
+      axisLabel: { color: '#5b6a85', fontSize: 11 }
+    },
+    series: [{
+      type: 'bar',
+      barWidth: '62%',
+      data: risk.hours.map((h) => h.events),
+      itemStyle: {
+        borderRadius: [4, 4, 0, 0],
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: '#ff8a3d' },
+          { offset: 1, color: 'rgba(255,138,61,.08)' }
+        ])
+      }
+    }]
+  })
 }
 
 function drawBar() {
@@ -226,23 +324,46 @@ function drawDonut() {
   })
 }
 
-function onResize() { bar?.resize(); donut?.resize() }
+function onResize() { bar?.resize(); donut?.resize(); hoursChart?.resize() }
 
 onMounted(() => {
   load()
   loadAux()
-  timer = setInterval(() => { load(); loadAux() }, 10000)
+  loadRisk()
+  // 风险画像是按天聚合的，变化很慢，跟随 10 秒轮询一起刷新即可，无需单独定频
+  timer = setInterval(() => { load(); loadAux(); loadRisk() }, 10000)
   window.addEventListener('resize', onResize)
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   window.removeEventListener('resize', onResize)
-  bar?.dispose(); donut?.dispose()
+  bar?.dispose(); donut?.dispose(); hoursChart?.dispose()
 })
 </script>
 
 <style scoped>
 /* .ellip / .c-dot 已收敛到全局 style.css 的通用工具类 */
+
+/* ---------- 风险预警 ---------- */
+.risk-list { display: flex; flex-direction: column; gap: 8px; }
+.risk-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: var(--r-sm);
+  background: var(--bg-inset); border: 1px solid var(--line-2);
+}
+/* 名次徽标：前三名用警示色，其余保持中性，避免整列都是红点反而看不出重点 */
+.risk-list .rank {
+  width: 20px; height: 20px; flex-shrink: 0;
+  display: grid; place-items: center;
+  border-radius: 6px; font-size: 11px; font-weight: 700;
+  background: rgba(122, 162, 220, 0.14); color: var(--tx-3);
+}
+.risk-list .rank.top { background: rgba(255, 30, 86, 0.18); color: #ff6b8a; }
+.risk-list .trend { flex-shrink: 0; font-size: 11px; white-space: nowrap; }
+.risk-list .trend--up { color: #ff8a3d; }
+.risk-list .trend--down { color: #4ade80; }
+.risk-list .trend--stable { color: var(--tx-3); }
+.risk-list .score { flex-shrink: 0; font-size: 12px; color: var(--tx-2); }
 
 /* 本页主区两栏等分：全局 .g-main 为 2.65:1，但行为类型分布过宽时柱状图留白太多，
    这里按 5:5 展示，与「最近报警」等宽 */

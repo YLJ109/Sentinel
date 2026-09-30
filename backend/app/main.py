@@ -15,7 +15,7 @@ from app.core.db import init_db
 from app.core.logbuffer import install as install_log_buffer
 from app.core.security import hash_password
 from app.models import Camera, User
-from app.routers import (alarms, auth, cameras, dashboard, detect, history, media, system, video)
+from app.routers import (alarms, auth, cameras, dashboard, detect, history, media, risk, system, video)
 from app.vision.engine import engine
 from app.vision.registry import registry
 
@@ -194,6 +194,8 @@ app.include_router(history.router)
 app.include_router(dashboard.router)
 app.include_router(system.router)
 app.include_router(media.router)
+# 事前预警（基于历史事件的风险画像，与实时报警互补）
+app.include_router(risk.router)
 
 # 取证文件不再以静态目录匿名暴露，统一经 /api/media/{path} 鉴权后返回
 
