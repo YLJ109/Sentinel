@@ -131,7 +131,7 @@ const scanning = ref(false)
 const editing = reactive({ id: null, field: '' })
 const draft = ref('')
 
-const typeZh = { fall: '跌倒', smoke: '抽烟', fight: '打架', argue: '争吵', crowd: '人员聚集', person: '人员', normal: '正常' }
+const typeZh = { fall: '跌倒', smoke: '抽烟', bullying: '欺凌', fight: '打架', argue: '争吵', crowd: '人员聚集', person: '人员', normal: '正常' }
 
 const fmt = (t) => (t ? new Date(t).toLocaleTimeString('zh-CN', { hour12: false }) : '')
 const online = computed(() => items.value.filter((x) => x.cam.enabled).length)

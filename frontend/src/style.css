@@ -1038,6 +1038,9 @@ button.sb-cap:hover { background: rgba(122, 162, 220, 0.1); border-color: var(--
 .bbox.smoke .lb { background: #d7c341; }
 .bbox.fight { border-color: var(--danger); box-shadow: 0 0 16px rgba(255, 77, 109, 0.6); animation: bbox-flash 0.9s infinite; }
 .bbox.fight .lb { background: var(--danger); color: #fff; }
+/* 欺凌：单向侵害，用更强烈的品红红与更快的闪烁，视觉优先级高于普通打架 */
+.bbox.bullying { border-color: #ff1e56; box-shadow: 0 0 18px rgba(255, 30, 86, 0.75); animation: bbox-flash 0.7s infinite; }
+.bbox.bullying .lb { background: #ff1e56; color: #fff; }
 @keyframes bbox-flash { 50% { border-color: rgba(255, 77, 109, 0.35); } }
 .bbox.argue { border-color: #ff8a3d; }
 .bbox.argue .lb { background: #ff8a3d; }

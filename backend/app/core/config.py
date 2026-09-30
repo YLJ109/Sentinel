@@ -19,13 +19,17 @@ DEFAULT_SECRET_KEY = "change-me-in-production-please-use-32+chars"
 
 # 各类异常行为的中文标签与报警级别
 BEHAVIOR_LABELS: dict[str, dict[str, object]] = {
-    "fall":   {"label": "跌倒",     "is_bullying": False, "level": "medium"},
-    "smoke":  {"label": "疑似吸烟", "is_bullying": False, "level": "low"},
-    "fight":  {"label": "打架",     "is_bullying": True,  "level": "high"},
-    "argue":  {"label": "争吵",     "is_bullying": True,  "level": "medium"},
-    "crowd":  {"label": "人员聚集", "is_bullying": False, "level": "low"},
-    "person": {"label": "人员",     "is_bullying": False, "level": "low"},
-    "normal": {"label": "正常",     "is_bullying": False, "level": "low"},
+    "fall":     {"label": "跌倒",     "is_bullying": False, "level": "medium"},
+    "smoke":    {"label": "疑似吸烟", "is_bullying": False, "level": "low"},
+    # fight 与 bullying 都是高等级，但语义不同：
+    # fight = 对等冲突（互殴），bullying = 单向欺凌（力量/主动权高度不对等）。
+    # 由 vision/behaviors.py 的互动对称性分析区分，详见 _interaction()。
+    "fight":    {"label": "打架",     "is_bullying": True,  "level": "high"},
+    "bullying": {"label": "欺凌",     "is_bullying": True,  "level": "high"},
+    "argue":    {"label": "争吵",     "is_bullying": True,  "level": "medium"},
+    "crowd":    {"label": "人员聚集", "is_bullying": False, "level": "low"},
+    "person":   {"label": "人员",     "is_bullying": False, "level": "low"},
+    "normal":   {"label": "正常",     "is_bullying": False, "level": "low"},
 }
 
 
@@ -92,7 +96,11 @@ class Settings(BaseSettings):
     FACE_MAX_FACES: int = 30             # 单帧最多标注的人脸数
 
     # ===== 推理性能 =====
-    INFER_FPS_LIMIT: int = 12            # 实时流每秒最多推理帧数（同一路多个观看者共享）
+    # 实时流每秒最多推理帧数（同一路多个观看者共享该限频窗口）。
+    # 前端固定按 10fps（每 100ms 一帧）送检，这里留到 12 是刻意为之：
+    #   ① 两个观看者同看一路时总送帧率会到 20fps，超出的部分由共享窗口丢弃；
+    #   ② 若把两者调成相等，调度抖动会让单页正常观看也偶发丢帧。
+    INFER_FPS_LIMIT: int = 12
     ENABLE_POSE: bool = True             # 关闭可省算力（仅保留人员/聚集检测）
     # 运动门控：画面几乎静止时跳过推理，显著降低空场景算力占用
     MOTION_GATE_ENABLED: bool = True
@@ -112,8 +120,36 @@ class Settings(BaseSettings):
     FIGHT_MIN_FRAMES: int = 4
     FIGHT_IOU_OVERLAP: float = 0.06      # 外接框交叠比（肢体纠缠）
 
-    ARGUE_DIST_RATIO: float = 2.2        # 争吵：面对面且持续贴近
+    ARGUE_DIST_RATIO: float = 1.1        # 争吵：必须贴得很近。
+                                         # 原值 2.2（约 3.7m）过宽，会让并肩走路、
+                                         # 排队等一切正常近距离场景全部命中
     ARGUE_MIN_FRAMES: int = 10
+    # 争吵必须存在「对峙姿态」或「轻微肢体动作」，否则两人只是并列站着
+    # （排队、并肩同行）也会被判成争吵 —— 这是实测发现的误报来源
+    ARGUE_FACING_MIN: float = 0.35       # 至少一方肩线明显朝向对方
+    ARGUE_MIN_MOTION: float = 0.12       # 或存在手势/前倾等轻微动作
+
+    # ===== 欺凌判别：互动对称性分析 =====
+    # 打斗/推搡成立之后，再判断它是"单向欺凌"还是"对等冲突/嬉闹"。
+    # 常见方案只判"距离近 + 手部动作快"，因此并肩走路、拍肩、课间打闹都会误报；
+    # 这里用四个可解释的"不对等程度"指标来区分（全部来自已有骨架与轨迹）：
+    #   ① 运动强度不对称：一方挥臂猛烈、另一方几乎不动
+    #   ② 退缩不对称：一方持续逼近、另一方持续后撤
+    #   ③ 追逃模式：同一个人既被追又在逃（不同人分工）
+    #   ④ 压制姿态：贴近时一方头部低于另一方肩线
+    BULLY_SCORE_THRESHOLD: float = 0.52    # 累积分数超过该值判为欺凌，否则判为对等冲突
+    BULLY_ASYM_WEIGHT: float = 0.34
+    BULLY_FLEE_WEIGHT: float = 0.30
+    BULLY_CHASE_WEIGHT: float = 0.22
+    BULLY_SUPPRESS_WEIGHT: float = 0.14
+    BULLY_EMA_ALPHA: float = 0.25          # 交互指标的滑动平均系数（抑制单帧抖动）
+    BULLY_MIN_FRAMES: int = 3              # 判定生效所需的连续帧数
+    # 嬉闹抑制：四项指标同时"对等且无退缩"时，判为嬉闹，不产生报警。
+    # 这是降低误报的关键闸门 —— 课间追逐打闹是本场景最主要的误报来源。
+    PLAY_ASYM_MAX: float = 0.30            # 运动强度需足够对称
+    PLAY_RETREAT_MAX: float = 0.18         # 无明显单向后撤
+    PLAY_CHASE_MAX: float = 0.25           # 无明显追逃分工
+    PLAY_SUPPRESS_MAX: float = 0.50        # 无明显压制姿态
 
     SMOKE_HAND_HEAD_RATIO: float = 0.62  # 手腕-鼻尖距离 / 肩宽
     SMOKE_MIN_FRAMES: int = 8

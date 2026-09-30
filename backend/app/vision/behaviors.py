@@ -25,6 +25,12 @@ from app.vision.types import (
 
 KP_CONF_MIN = 0.30  # 关键点置信度门限
 
+# 逼近/远离速度的归一化基准（帧宽/秒）。取值参考真实量级：
+# 正常步行约 0.1、快走约 0.2、奔跑约 0.4 帧宽/秒。
+# 取 0.25 表示"快走及以上"才算明显的主动逼近或后撤 —— 定得过高会让
+# "追逃"这项指标几乎测不出来（欺凌场景里后撤的速度本就不会很快）。
+_APPROACH_FULL_SCALE = 0.25
+
 
 def _kp(kpts: np.ndarray | None, idx: int) -> np.ndarray | None:
     """取一个可信关键点坐标。"""
@@ -105,6 +111,120 @@ def box_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / (aa + bb - inter + 1e-9))
 
 
+def _approach_rate(a: Track, b: Track, window: int = 4) -> tuple[float, float]:
+    """两人各自"朝对方移动"的速度（归一化画面宽度 / 秒）。
+
+    正值 = 朝对方移动，负值 = 远离对方。位移被投影到 AB 连线上，因此
+    "横向走过"不会被误判成逼近或逃离 —— 这是把"追逃"与"路过"区分开的关键。
+    返回 ``(a 的速度, b 的速度)``，均为沿 A→B 方向的分量。
+    """
+    ref_a = a.prev(window) or (a.hist[0] if a.hist else None)
+    ref_b = b.prev(window) or (b.hist[0] if b.hist else None)
+    if ref_a is None or ref_b is None:
+        return 0.0, 0.0
+
+    t_a, box_a, _ = ref_a
+    t_b, box_b, _ = ref_b
+    ca0 = np.array([(box_a[0] + box_a[2]) / 2.0, (box_a[1] + box_a[3]) / 2.0])
+    cb0 = np.array([(box_b[0] + box_b[2]) / 2.0, (box_b[1] + box_b[3]) / 2.0])
+
+    u = b.center - a.center
+    n = float(np.linalg.norm(u))
+    if n < 1e-6:
+        return 0.0, 0.0
+    u = u / n
+
+    dt_a = max(1e-3, a.updated_at - t_a)
+    dt_b = max(1e-3, b.updated_at - t_b)
+    # 两人共用同一个方向轴 u（A→B），但返回值的语义要统一成"朝对方移动"：
+    #   A 朝 B 移动 = 沿 +u
+    #   B 朝 A 移动 = 沿 -u  ← 这里必须取负，否则两人同向行走会被算成
+    #   "双方都在朝对方逼近"，进而让"追逃"与"退缩"两项指标恒为 0。
+    va = float(np.dot(a.center - ca0, u)) / dt_a
+    vb = -float(np.dot(b.center - cb0, u)) / dt_b
+    return va, vb
+
+
+def gesture_speed(track: Track, window: int = 4) -> float:
+    """手腕**相对身体中心**的运动速度（归一化 / 秒）。
+
+    与 ``wrist_speed`` 的关键差别：后者是绝对速度，人正常走路时整个人平移
+    也会产生读数，因此不能用它判断"有没有在做手势"。这里先减去身体中心的
+    位移，只保留手腕相对身体的运动 —— 挥手、指人、比划才会命中，
+    "边走边聊"不会。
+    """
+    if len(track.hist) < 2:
+        return 0.0
+    now_t, now_box, now_k = track.hist[-1]
+    ref = track.prev(window) or track.hist[0]
+    ref_t, ref_box, ref_k = ref
+    if now_k is None or ref_k is None:
+        return 0.0
+    dt = max(1e-3, now_t - ref_t)
+    c_now = np.array([(now_box[0] + now_box[2]) / 2, (now_box[1] + now_box[3]) / 2])
+    c_ref = np.array([(ref_box[0] + ref_box[2]) / 2, (ref_box[1] + ref_box[3]) / 2])
+    d_body = c_now - c_ref
+    best = 0.0
+    for idx in (KP_L_WRIST, KP_R_WRIST):
+        a, b = _kp(ref_k, idx), _kp(now_k, idx)
+        if a is None or b is None:
+            continue
+        best = max(best, float(np.linalg.norm((b - a) - d_body)) / dt)
+    return best
+
+
+def facing_score(a: Track, b: Track) -> float:
+    """两人的"对峙程度"：肩线与连线越接近垂直，返回值越大（0~1）。
+
+    面对面争执时人的肩线大致垂直于两人连线；并肩同行时肩线与连线平行。
+    COCO-17 只有肩点、拿不到真正的头部朝向，这里用肩线作为身体朝向的近似。
+    取两人中的较大者 —— 只要有一方明显侧身面向对方，就说明存在对峙关系。
+    """
+    u = b.center - a.center
+    n = float(np.linalg.norm(u))
+    if n < 1e-6:
+        return 0.0
+    u = u / n
+    best = 0.0
+    for t in (a, b):
+        l, r = _kp(t.kpts, KP_L_SHOULDER), _kp(t.kpts, KP_R_SHOULDER)
+        if l is None or r is None:
+            continue
+        v = r - l
+        m = float(np.linalg.norm(v))
+        if m < 1e-6:
+            continue
+        v = v / m
+        # |cos| 越小 → 肩线越垂直于连线 → 越像面对面
+        best = max(best, 1.0 - abs(float(np.dot(v, u))))
+    return best
+
+
+def _suppression(a: Track, b: Track) -> float:
+    """A 是否处于被 B 压制的姿态：A 的头部低于 B 的肩线。
+
+    仅在两人贴近时由调用方启用，避免身高差与透视关系造成误判。
+    """
+    nose_a = _kp(a.kpts, KP_NOSE)
+    sh_b = _mid(_kp(b.kpts, KP_L_SHOULDER), _kp(b.kpts, KP_R_SHOULDER))
+    if nose_a is None or sh_b is None:
+        return 0.0
+    return 1.0 if float(nose_a[1]) > float(sh_b[1]) else 0.0
+
+
+class _Interaction:
+    """一对轨迹的交互统计（指数滑动平均，不保存完整历史）。"""
+
+    __slots__ = ("asym", "retreat", "chase", "suppress", "samples")
+
+    def __init__(self) -> None:
+        self.asym = 0.0        # 运动强度不对称度
+        self.retreat = 0.0     # 退缩不对称度
+        self.chase = 0.0       # 追逃模式强度
+        self.suppress = 0.0    # 压制姿态强度
+        self.samples = 0
+
+
 @dataclass
 class BehaviorHit:
     """一次行为判定结果。"""
@@ -121,6 +241,8 @@ class BehaviorAnalyzer:
 
     def __init__(self) -> None:
         self._pair_votes: dict[tuple[int, int, str], int] = {}
+        # 每对轨迹的交互统计（欺凌 / 对等冲突 / 嬉闹判别用），随配对消失一并回收
+        self._pair_state: dict[tuple[int, int], _Interaction] = {}
 
     # ---------- 对外入口 ----------
     def analyze(self, tracks: list[Track], extra_dets: list[Detection] | None = None) -> list[BehaviorHit]:
@@ -257,7 +379,8 @@ class BehaviorAnalyzer:
                 mean_h = (a.height + b.height) / 2
                 ratio = dist / max(1e-6, mean_h)
                 overlap = box_iou(a.bbox, b.bbox)
-                speed = max(wrist_speed(a), wrist_speed(b))
+                speed_a, speed_b = wrist_speed(a), wrist_speed(b)
+                speed = max(speed_a, speed_b)
                 raised = arm_raised(a.kpts) or arm_raised(b.kpts)
 
                 # --- 打架判定 ---
@@ -273,28 +396,50 @@ class BehaviorAnalyzer:
 
                     fv = self._vote_pair(key_base, "fight", fight_hit)
                     if fight_hit and fv >= settings.FIGHT_MIN_FRAMES:
+                        # 在"存在打斗/推搡"的基础上，再判它是单向欺凌还是对等冲突，
+                        # 并识别嬉闹以避免课间打闹误报 —— 这是本项目的关键差异点。
+                        inter = self._interaction(a, b, key_base, ratio, speed_a, speed_b)
+                        playful = self._is_playful(inter, speed)
+                        pv = self._vote_pair(key_base, "play", playful)
+                        if playful and pv >= settings.BULLY_MIN_FRAMES:
+                            continue    # 判定为嬉闹：本帧不产生报警
+
+                        is_bully = inter["bully_score"] >= settings.BULLY_SCORE_THRESHOLD
+                        event = "bullying" if is_bully else "fight"
                         sev = min(1.0, 0.35 + speed / max(1e-6, settings.FIGHT_WRIST_SPEED * 2.2)
                                   + min(0.3, overlap * 2.0))
-                        conf = round(min(0.97, 0.55 + 0.4 * sev), 3)
+                        base = 0.55 + 0.4 * sev
+                        # 欺凌再叠加"不对等程度"，让单向欺凌的报警比普通冲突更突出
+                        conf = round(min(0.97, base + (0.08 * inter["bully_score"] if is_bully else 0.0)), 3)
                         hits.append(BehaviorHit(
-                            "fight", conf, [a.tid, b.tid],
+                            event, conf, [a.tid, b.tid],
                             self._union_box([a.bbox, b.bbox]),
                             {"dist_ratio": round(ratio, 2), "overlap": round(overlap, 3),
                              "wrist_speed": round(speed, 2), "arm_raised": raised,
-                             "entangle_hit": entangled, "votes": fv},
+                             "entangle_hit": entangled, "votes": fv,
+                             **inter},
                         ))
                         continue
 
-                # --- 争吵：持续贴近、直立、无剧烈挥臂 ---
+                # --- 争吵：贴得很近 + 直立 + 无剧烈挥臂 + 存在对峙姿态或轻微动作 ---
                 if not runtime_config.capability("argue"):
                     continue
                 both_upright = all(
                     (torso_angle_deg(t.kpts) or 0.0) <= settings.FALL_TORSO_ANGLE for t in (a, b)
                 )
+                # 「对峙姿态」这一条不可省：缺了它，两人并排站着（排队、并肩同行）
+                # 会因为"距离近 + 没有挥臂"而被判成争吵 —— 实测确认的误报来源。
+                facing = facing_score(a, b)
+                # 用手势速度（相对身体）而非绝对手腕速度：绝对速度里含走路时的
+                # 整体平移，会把"边走边聊"误判成"在比划"
+                gesture = max(gesture_speed(a), gesture_speed(b))
+                confrontational = (facing >= settings.ARGUE_FACING_MIN
+                                   or gesture >= settings.ARGUE_MIN_MOTION)
                 argue_hit = (
                     ratio <= settings.ARGUE_DIST_RATIO
                     and both_upright
                     and speed < settings.FIGHT_WRIST_SPEED
+                    and confrontational
                 )
                 av = self._vote_pair(key_base, "argue", argue_hit)
                 if argue_hit and av >= settings.ARGUE_MIN_FRAMES:
@@ -302,9 +447,85 @@ class BehaviorAnalyzer:
                     hits.append(BehaviorHit(
                         "argue", conf, [a.tid, b.tid],
                         self._union_box([a.bbox, b.bbox]),
-                        {"dist_ratio": round(ratio, 2), "votes": av},
+                        {"dist_ratio": round(ratio, 2), "facing": round(facing, 2), "votes": av},
                     ))
         return hits
+
+    # ---------- 互动对称性分析：欺凌 / 对等冲突 / 嬉闹 ----------
+    def _interaction(self, a: Track, b: Track, key: tuple[int, int],
+                     ratio: float, speed_a: float, speed_b: float) -> dict[str, float]:
+        """刻画两人互动的"不对等程度"。
+
+        常见打架检测只判"距离近 + 手部动作快"，因此并肩走路、拍肩、课间追逐打闹
+        都会误报。根因在于：这三类场景在"是否有肢体动作"这个维度上无法区分，
+        真正的差别在于 **力量与主动权是否对等**。这里用四个可解释指标来刻画：
+
+          ① 运动强度不对称 asymmetry —— 一方猛烈挥臂、另一方几乎不动
+          ② 退缩不对称   retreat     —— 一方持续逼近、另一方持续后撤
+          ③ 追逃模式     chase       —— 明确的"追的人"与"逃的人"分工
+          ④ 压制姿态     suppression —— 贴近时一方头部低于另一方肩线
+
+        四项指标全部来自已有的 COCO-17 关键点与轨迹历史，不引入任何新模型，
+        每一项都能单独向评审解释其物理含义与阈值来历。
+        """
+        st = self._pair_state.setdefault(key, _Interaction())
+
+        # ① 运动强度不对称：两人手腕速度的相对差异，0 表示完全对等
+        asym = abs(speed_a - speed_b) / (speed_a + speed_b + 1e-6)
+
+        # ②③ 逼近/远离速度（已投影到连线方向，横向路过不计）
+        va, vb = _approach_rate(a, b)
+        fs = _APPROACH_FULL_SCALE
+        a_approach = min(1.0, max(0.0, va) / fs)
+        b_approach = min(1.0, max(0.0, vb) / fs)
+        a_flee = min(1.0, max(0.0, -va) / fs)
+        b_flee = min(1.0, max(0.0, -vb) / fs)
+
+        # 追逃：一方在逼近、同时另一方在后撤（两种分工取更强者）
+        chase = max(min(a_approach, b_flee), min(b_approach, a_flee))
+        # 退缩不对称：两人的"逃离倾向"差距越大，越接近单向欺凌
+        retreat = abs(a_flee - b_flee)
+
+        # ④ 压制姿态：仅在贴近时计算，避免身高差与透视造成误判
+        suppress = 0.0
+        if ratio <= settings.FIGHT_DIST_RATIO:
+            suppress = max(_suppression(a, b), _suppression(b, a))
+
+        al = settings.BULLY_EMA_ALPHA
+        st.asym += (asym - st.asym) * al
+        st.retreat += (retreat - st.retreat) * al
+        st.chase += (chase - st.chase) * al
+        st.suppress += (suppress - st.suppress) * al
+        st.samples += 1
+
+        score = (settings.BULLY_ASYM_WEIGHT * st.asym
+                 + settings.BULLY_FLEE_WEIGHT * st.retreat
+                 + settings.BULLY_CHASE_WEIGHT * st.chase
+                 + settings.BULLY_SUPPRESS_WEIGHT * st.suppress)
+        return {
+            "asymmetry": round(st.asym, 3),
+            "retreat": round(st.retreat, 3),
+            "chase": round(st.chase, 3),
+            "suppression": round(st.suppress, 3),
+            "bully_score": round(min(1.0, score), 3),
+        }
+
+    @staticmethod
+    def _is_playful(inter: dict[str, float], speed: float) -> bool:
+        """嬉闹判定：动作不剧烈，且四项对称指标都是"对等且无退缩"。
+
+        为什么必须叠加"动作不剧烈"：如果双方手腕速度已经到了强证据级别，
+        那就说明确实在激烈互殴，即便双方完全对等也应报警。
+        嬉闹抑制只针对"贴近 + 轻微肢体接触"这一类最常见的误报 ——
+        排队、并肩、拍肩、轻推。课间追逐打闹是本场景最大的误报来源
+        （有公开案例提到"两个同学并肩走路也会报警"）。
+        """
+        if speed >= settings.FIGHT_WRIST_SPEED:
+            return False
+        return (inter["asymmetry"] <= settings.PLAY_ASYM_MAX
+                and inter["retreat"] <= settings.PLAY_RETREAT_MAX
+                and inter["chase"] <= settings.PLAY_CHASE_MAX
+                and inter["suppression"] <= settings.PLAY_SUPPRESS_MAX)
 
     def _vote_pair(self, key: tuple[int, int], event: str, hit: bool) -> int:
         k = (key[0], key[1], event)
@@ -323,6 +544,10 @@ class BehaviorAnalyzer:
         for k in list(self._pair_votes.keys()):
             if k[0] not in alive or k[1] not in alive:
                 self._pair_votes.pop(k, None)
+        # 交互统计同样要回收，否则长期运行下会随历史配对数量持续增长
+        for k in list(self._pair_state.keys()):
+            if k[0] not in alive or k[1] not in alive:
+                self._pair_state.pop(k, None)
 
     # ---------- 自定义行为模型（烟/暴力等）----------
     def _model_behaviors(self, dets: list[Detection] | None) -> list[BehaviorHit]:

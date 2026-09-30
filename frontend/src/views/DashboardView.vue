@@ -118,9 +118,9 @@ let timer = null
 
 const levelZh = { high: '高危', medium: '中警', low: '提示' }
 const statusZh = { pending: '待处置', handling: '处置中', resolved: '已解决', ignored: '已忽略' }
-const typeZh = { fall: '跌倒', smoke: '抽烟', fight: '打架', argue: '争吵', crowd: '人员聚集', person: '人员', normal: '正常' }
+const typeZh = { fall: '跌倒', smoke: '抽烟', bullying: '欺凌', fight: '打架', argue: '争吵', crowd: '人员聚集', person: '人员', normal: '正常' }
 const srcZh = { webcam: '本机摄像头', rtsp: 'RTSP', file: '视频文件' }
-const typeColor = { fight: '#ff4d6d', argue: '#ff8a3d', fall: '#ffb020', smoke: '#d7c341', crowd: '#9b7bff', person: '#2fd6f0' }
+const typeColor = { bullying: '#ff1e56', fight: '#ff4d6d', argue: '#ff8a3d', fall: '#ffb020', smoke: '#d7c341', crowd: '#9b7bff', person: '#2fd6f0' }
 
 const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '')
 const totalEvents = computed(() => Object.values(stats.event_type_breakdown || {}).reduce((a, b) => a + b, 0))

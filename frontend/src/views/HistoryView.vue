@@ -353,6 +353,7 @@ const statusOptions = [
   { value: 'failed', label: '失败' }
 ]
 const typeOptions = [
+  { value: 'bullying', label: '欺凌' },
   { value: 'fight', label: '打架' },
   { value: 'argue', label: '争吵' },
   { value: 'fall', label: '跌倒' },

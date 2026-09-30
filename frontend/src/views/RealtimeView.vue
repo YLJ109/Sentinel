@@ -197,7 +197,7 @@ let detectRetryTimer = null
 let audioRetryTimer = null
 
 const camOptions = computed(() => cameras.value.map((c) => ({ value: c.id, label: `${c.name}（${c.location || '未设置位置'}）` })))
-const lvOf = { fight: 'high', argue: 'high', fall: 'medium', smoke: 'low', crowd: 'low' }
+const lvOf = { bullying: 'high', fight: 'high', argue: 'high', fall: 'medium', smoke: 'low', crowd: 'low' }
 const clock = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false })
 
 // 跳过推理原因中文映射
@@ -214,7 +214,8 @@ const chipText = computed(() => {
 })
 
 // 各事件类型对应的框/骨架颜色（person 为青色，异常行为用对应色）
-const TYPE_COLOR = { person: '#2fd6f0', fight: '#ff4d6d', argue: '#ff8a3d', fall: '#ffb020', smoke: '#d7c341', crowd: '#9b7bff' }
+// 欺凌用比打架更强烈的品红红：它是单向侵害，优先级最高
+const TYPE_COLOR = { person: '#2fd6f0', bullying: '#ff1e56', fight: '#ff4d6d', argue: '#ff8a3d', fall: '#ffb020', smoke: '#d7c341', crowd: '#9b7bff' }
 
 // COCO-17 骨架连线
 const SKELETON = [
@@ -527,7 +528,7 @@ function connectDetect() {
     skipReason.value = d.skip_reason || ''
     motion.value = d.motion ?? 0
     for (const h of behaviors.value) {
-      if (['fight', 'argue', 'fall', 'smoke', 'crowd'].includes(h.event_type)) {
+      if (['bullying', 'fight', 'argue', 'fall', 'smoke', 'crowd'].includes(h.event_type)) {
         events.unshift({ ...h, lv: lvOf[h.event_type] || 'low', t: Date.now() })
         if (events.length > 60) events.pop()
       }

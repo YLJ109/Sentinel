@@ -88,7 +88,9 @@ def _behaviors_to_boxes(result: FrameResult) -> list[dict]:
             "track_ids": list(h.track_ids),
             "bbox": None if h.bbox is None else [round(float(v), 4) for v in h.bbox],
             "is_bullying": bool(behavior_meta(h.event_type)["is_bullying"]),
-            "detail": {k: v for k, v in list(h.detail.items())[:8]},
+            # 判定特征保留完整：欺凌/打架的区分依据（互动对称性四项指标）
+            # 需要一并透出，前端可解释面板与取证详情都依赖它
+            "detail": {k: v for k, v in list(h.detail.items())[:14]},
         }
         for h in result.behaviors
     ]
