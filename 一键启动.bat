@@ -1,0 +1,130 @@
+@echo off
+setlocal
+title 守望 Sentinel · 一键启动
+
+rem ===========================================================================
+rem  守望 Sentinel · 校园反霸凌智能检测系统 —— 一键启动（开发联调模式）
+rem
+rem  作用：环境自检 -^> 补齐 .env -^> 拉起后端(8000) 与前端(5173) -^> 打开浏览器
+rem  用法：直接双击本文件。两个服务会各自弹出一个窗口，关闭窗口即停止对应服务。
+rem ===========================================================================
+
+set "ROOT=%~dp0"
+cd /d "%ROOT%"
+
+echo.
+echo  ==============================================================
+echo    守望 Sentinel · 校园反霸凌智能检测系统
+echo    一键启动（开发联调模式）
+echo  ==============================================================
+echo.
+
+rem ---------- 1/4 环境自检 ----------
+call :require "backend\.venv\Scripts\python.exe" "后端虚拟环境" "请先在 backend 目录执行 python -m venv .venv，再执行 .venv\Scripts\python -m pip install -r requirements.txt"
+if errorlevel 1 goto :abort
+
+call :require "frontend\node_modules" "前端依赖" "请先在 frontend 目录执行 npm install"
+if errorlevel 1 goto :abort
+
+where node >nul 2>nul
+if errorlevel 1 (
+    echo  [错误] 未检测到 Node.js，前端无法启动。
+    echo         请安装 Node.js 18 或更高版本后重试。
+    echo.
+    goto :abort
+)
+
+if not exist "backend\.env" (
+    copy /y "backend\.env.example" "backend\.env" >nul
+    echo  [提示] 未找到 backend\.env，已从 .env.example 生成一份。
+    echo         如需语音识别功能，请在 backend\.env 中填写 CAB_DASHSCOPE_API_KEY。
+    echo.
+)
+
+rem ---------- 2/4 端口占用提示 ----------
+call :port_busy 8000
+if not errorlevel 1 (
+    echo  [警告] 端口 8000 已被占用，后端可能启动失败。
+    echo         若为上次遗留的进程，请先在任务管理器中结束它。
+    echo.
+)
+call :port_busy 5173
+if not errorlevel 1 (
+    echo  [警告] 端口 5173 已被占用，前端可能启动失败。
+    echo.
+)
+
+rem ---------- 3/4 启动后端 ----------
+echo  [1/2] 正在启动后端服务（http://localhost:8000）...
+start "守望 · 后端服务" /D "%ROOT%backend" cmd /k ".venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+call :wait_port 8000 120
+if errorlevel 1 (
+    echo  [警告] 后端 120 秒内未就绪，请查看「守望 · 后端服务」窗口中的报错信息。
+    echo.
+) else (
+    echo        后端已就绪。
+)
+
+rem ---------- 4/4 启动前端 ----------
+echo  [2/2] 正在启动前端开发服务器（http://localhost:5173）...
+start "守望 · 前端服务" /D "%ROOT%frontend" cmd /k "npm run dev"
+call :wait_port 5173 120
+if errorlevel 1 (
+    echo  [警告] 前端 120 秒内未就绪，请查看「守望 · 前端服务」窗口中的报错信息。
+    echo.
+) else (
+    echo        前端已就绪。
+)
+
+start "" http://localhost:5173
+
+echo.
+echo  ==============================================================
+echo    启动完成
+echo  --------------------------------------------------------------
+echo    访问地址  http://localhost:5173
+echo    接口文档  http://localhost:8000/docs
+echo    默认账号  admin / admin123（登录后请立即修改密码）
+echo  --------------------------------------------------------------
+echo    停止服务  关闭「守望 · 后端服务」与「守望 · 前端服务」两个窗口即可
+echo  ==============================================================
+echo.
+pause
+exit /b 0
+
+rem ===========================================================================
+rem  子过程
+rem ===========================================================================
+
+:abort
+echo  --------------------------------------------------------------
+echo  启动已中止，请先按上面的提示补齐环境后重试。
+echo.
+pause
+exit /b 1
+
+rem 检查文件或目录是否存在：  call :require "路径" "名称" "缺失时的安装指引"
+:require
+if exist "%~1" exit /b 0
+echo  [错误] 未找到 %~2
+echo         缺失项：%~1
+echo         解决方法：%~3
+echo.
+exit /b 1
+
+rem 端口是否处于 LISTENING：占用返回 0，空闲返回 1
+:port_busy
+netstat -ano | findstr /c:":%~1 " | findstr /i "LISTENING" >nul 2>nul
+if errorlevel 1 exit /b 1
+exit /b 0
+
+rem 等待端口进入 LISTENING：  call :wait_port 端口 超时秒数
+:wait_port
+set /a _tries=0
+:wait_port_loop
+call :port_busy %~1
+if not errorlevel 1 exit /b 0
+set /a _tries+=1
+if %_tries% geq %~2 exit /b 1
+ping -n 2 127.0.0.1 >nul
+goto :wait_port_loop

@@ -16,5 +16,16 @@ export default defineConfig({
       '/api': { target: 'http://localhost:8000', changeOrigin: true, ws: true },
       '/data': { target: 'http://localhost:8000', changeOrigin: true }
     }
+  },
+  // npm run preview（生产构建产物的本地托管，供「一键部署」使用）
+  // 必须单独配置：preview 不会继承 server.proxy，缺了它 dist 起来后所有 /api 请求 404、
+  // 实时检测通道也建不起来，表现为「页面能开但功能全废」。
+  preview: {
+    host: '0.0.0.0',
+    port: 4173,
+    proxy: {
+      '/api': { target: 'http://localhost:8000', changeOrigin: true, ws: true },
+      '/data': { target: 'http://localhost:8000', changeOrigin: true }
+    }
   }
 })
