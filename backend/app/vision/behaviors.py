@@ -266,7 +266,7 @@ class BehaviorAnalyzer:
         if runtime_config.capability("fight") or runtime_config.capability("argue"):
             hits.extend(self._pairs(people))
 
-        hits.extend(self._model_behaviors(extra_dets))
+        hits = self._fuse_model_hits(hits, self._model_behaviors(extra_dets))
         self._decay_pairs(people)
         return hits
 
@@ -575,6 +575,47 @@ class BehaviorAnalyzer:
                  "label": behavior_meta(mapped)["label"]},
             ))
         return out
+
+    def _fuse_model_hits(self, rule_hits: list[BehaviorHit],
+                         model_hits: list[BehaviorHit]) -> list[BehaviorHit]:
+        """把「骨架规则判定」与「自定义行为模型」的结果做双证据融合。
+
+        两者是彼此独立的证据来源：
+          - 规则来自姿态几何与运动学，可解释、零训练成本，但阈值依赖现场标定；
+          - 模型来自数据驱动，泛化更好，但是黑盒，判定口径也与规则不同。
+        同一目标上两条证据同时命中时，可信度显著高于任一单独来源 ——
+        这与视觉/语音的多模态融合是同一思路，此处做的是「同模态内的双证据融合」。
+
+        融合规则：
+          - 同类 + 位置重叠 → 加权平均并上浮置信度，detail 中标注 fused=True
+          - 模型命中但规则未命中 → 原样保留，用模型补规则的漏报
+        """
+        if not model_hits:
+            return rule_hits
+
+        matched: set[int] = set()
+        for rh in rule_hits:
+            for j, mh in enumerate(model_hits):
+                if j in matched or mh.event_type != rh.event_type:
+                    continue
+                if rh.bbox is None or mh.bbox is None:
+                    continue
+                # 位置重叠才认为是同一目标：规则给出的是轨迹框，模型给出的是检测框
+                if box_iou(rh.bbox, mh.bbox) < 0.2:
+                    continue
+                fused = min(0.99, 0.5 * float(rh.confidence) + 0.5 * float(mh.confidence) + 0.08)
+                rh.confidence = round(fused, 3)
+                rh.detail = {
+                    **rh.detail,
+                    "model_class": mh.detail.get("class"),
+                    "model_conf": round(float(mh.confidence), 3),
+                    "fused": True,
+                }
+                matched.add(j)
+                break
+
+        # 未被规则覆盖的模型命中单独输出（对应"规则漏报、模型补上"的情形）
+        return rule_hits + [mh for j, mh in enumerate(model_hits) if j not in matched]
 
     @staticmethod
     def _union_box(boxes: list[np.ndarray]) -> np.ndarray | None:
