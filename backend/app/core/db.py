@@ -22,6 +22,9 @@ _PENDING_COLUMNS: list[tuple[str, str, str]] = [
     ("chat_logs", "is_final", "BOOLEAN DEFAULT 1"),
     ("cameras", "device_id", "VARCHAR(255)"),
     ("cameras", "code", "VARCHAR(64)"),
+    # 离线视频分析：把事件与转写挂到具体的视频任务上，供时间轴回放
+    ("detection_events", "video_id", "INTEGER"),
+    ("chat_logs", "video_id", "INTEGER"),
 ]
 
 

@@ -60,7 +60,23 @@ _ALARM_HELP: list[str] = [
     "别打我", "不要打我", "别打我了", "别再打我了", "求你别打",
     "放开我", "松开我", "放开我啊", "别碰我", "不要碰我",
     "报警", "快报警", "帮我报警", "我要报警",
+    # 真实课堂素材里反复出现的求救表达（此前漏召回）
+    "求求你们", "求你们", "求求你了", "别打了", "不要打了", "别打了求你了",
+    "别逼我", "不要逼我", "放过我", "放过我吧", "别喊人", "不许喊人",
     "help", "helpme", "saveme", "letmego",
+]
+
+# 财物勒索：在校园里属于必须立即介入的欺凌行为，因此归入 alarm 档而非 warn 档。
+# 提档还有一个直接收益 —— alarm 档会参与"首字锚定"的模糊匹配：
+# 实测素材里孩子说的是「把钱拿出来」，与词条「把钱交出来」仅一字之差，
+# 放在 warn 档不动用模糊匹配时会整句漏掉。
+_ALARM_EXTORT: list[str] = [
+    "交出来", "把钱交出来", "钱交出来", "把东西交出来", "交保护费", "交出来吧",
+    "把钱拿出来", "钱拿出来", "把钱掏出来", "把钱给我", "给我钱", "拿钱来",
+    "快点拿钱", "明天带钱来", "明天带钱", "让你带的钱", "带的钱呢", "带钱了吗",
+    "还钱", "赶紧还钱", "赔钱", "赔我钱", "你赔得起吗",
+    "把手机给我", "把手机交出来", "把东西给我", "把你东西给我",
+    "不给我就打你", "不给就揍你", "不给有你好看", "不交就打你",
 ]
 
 
@@ -100,14 +116,11 @@ _WARN_ISOLATE: list[str] = [
     "我们走不叫他", "装作没看见他", "当他不存在",
 ]
 
-_WARN_EXTORT: list[str] = [
-    "交出来", "把钱交出来", "钱交出来", "把东西交出来", "交保护费", "交出来吧",
-    "给我钱", "把钱给我", "拿钱来", "快点拿钱", "明天带钱来",
-    "还钱", "赶紧还钱", "赔钱", "赔我钱", "你赔得起吗",
-    "把手机给我", "把手机交出来", "把东西给我", "把你东西给我",
+_WARN_DOMINATE: list[str] = [
+    # 支配型要求：属于欺凌语言特征，但校园玩笑语境里也常见（"帮我写作业"），
+    # 因此停在 warn 档只做提示、不生成报警 —— 与财物勒索的区别就在这里。
     "分我一半", "给我买", "请我吃饭", "帮我写作业", "作业给我抄",
     "替我值日", "帮我背锅", "替我顶罪",
-    "不给我就打你", "不给就揍你", "不给有你好看", "不交就打你",
 ]
 
 _WARN_INTIMIDATE: list[str] = [
@@ -214,9 +227,10 @@ def build_lexicon() -> list[tuple[str, str, str, str]]:
 
     add(_ALARM_THREAT, CAT_THREAT, LV_ALARM, "manual")
     add(_ALARM_HELP, CAT_HELP, LV_ALARM, "manual")
+    add(_ALARM_EXTORT, CAT_EXTORT, LV_ALARM, "manual")
     add(_WARN_INSULT, CAT_INSULT, LV_WARN, "manual")
     add(_WARN_ISOLATE, CAT_ISOLATE, LV_WARN, "manual")
-    add(_WARN_EXTORT, CAT_EXTORT, LV_WARN, "manual")
+    add(_WARN_DOMINATE, CAT_EXTORT, LV_WARN, "manual")
     add(_WARN_INTIMIDATE, CAT_INTIMIDATE, LV_WARN, "manual")
     add(_HL_EXTRA, CAT_VIOLENCE, LV_HIGHLIGHT, "manual")
     # 规则扩展：见 _expand() 的说明，这些词只做高亮，不参与报警

@@ -23,8 +23,10 @@ from app.models import User
 
 router = APIRouter(prefix="/api/media", tags=["取证媒体"])
 
-# 仅允许读取这些子目录，避免把数据库文件等暴露出去
-ALLOWED_ROOTS = ("evidence", "clips", "uploads")
+# 仅允许读取这些子目录，避免把数据库文件等暴露出去。
+# faces 目录存放人脸注册照与头像 —— 它同样必须走鉴权，绝不能做成静态目录：
+# 否则只要知道文件名就能绕过权限直接拉走学生照片。
+ALLOWED_ROOTS = ("evidence", "clips", "uploads", "faces")
 
 
 def _resolve_safe(rel_path: str) -> Path:

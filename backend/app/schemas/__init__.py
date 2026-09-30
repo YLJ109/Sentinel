@@ -211,6 +211,9 @@ class DetectionBox(BaseModel):
     bbox: list[float] | None = None             # [x1,y1,x2,y2] 归一化 0-1
     is_bullying: bool = False
     kpts: list[list[float]] | None = None       # 17 × [x, y, conf]，归一化
+    # 身份识别结果（未识别或未授权时为 None，前端据此显示"未识别"）
+    person: dict[str, Any] | None = None
+    emotion: dict[str, Any] | None = None
 
 
 class BehaviorBox(BaseModel):
@@ -310,3 +313,85 @@ class DashboardStats(BaseModel):
     pending_alarms: int
     event_type_breakdown: dict[str, int]
     recent_alarms: list[AlarmOut]
+
+
+# ---------- 人员档案与合规 ----------
+# 人员类型白名单放在模型层约束：非法值在入参阶段就被拒，
+# 而不是等走到 person_store 里再抛"未知人员类型"。
+PersonType = Literal["student", "teacher", "staff"]
+ConsentSubject = Literal["self", "guardian"]
+
+
+class PersonIn(BaseModel):
+    """新增/修改人员。字段按类型可空，未提供的字段不修改。"""
+
+    owner_type: PersonType
+    # 学号 / 工号（新增时必填，修改时可选）
+    no: str | None = Field(default=None, max_length=32)
+    name: str | None = Field(default=None, max_length=64)
+    gender: str | None = Field(default=None, max_length=8)
+    status: str | None = Field(default=None, max_length=16)
+    note: str | None = Field(default=None, max_length=255)
+
+    # 学生
+    class_id: int | None = None
+    enroll_year: int | None = None
+    guardian_name: str | None = Field(default=None, max_length=64)
+    guardian_phone: str | None = Field(default=None, max_length=32)
+    guardian_relation: str | None = Field(default=None, max_length=16)
+
+    # 教师 / 管理人员
+    department: str | None = Field(default=None, max_length=64)
+    title: str | None = Field(default=None, max_length=32)
+    subject: str | None = Field(default=None, max_length=32)
+    position: str | None = Field(default=None, max_length=32)
+    phone: str | None = Field(default=None, max_length=32)
+
+
+class PersonOut(BaseModel):
+    """人员详情/列表项。结构由 person_store.serialize 生成。"""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ImportResult(BaseModel):
+    created: int = 0
+    updated: int = 0
+    skipped_count: int = 0
+    skipped: list[dict[str, Any]] = []
+
+
+class ClassIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    grade: str = Field(default="", max_length=32)
+
+
+class ConsentIn(BaseModel):
+    granted: bool
+    subject: ConsentSubject = "self"
+    method: str = Field(default="written", max_length=24)
+    note: str | None = Field(default=None, max_length=255)
+
+
+class PiaIn(BaseModel):
+    version: str = Field(min_length=1, max_length=32)
+    scope: str
+    conclusion: str = ""
+    risks: str | None = None
+    measures: str | None = None
+    reviewer: str = Field(default="", max_length=64)
+    # 复评到期时间（ISO 字符串）；留空则由后端按一年后自动填
+    expires_at: str | None = None
+
+
+class FaceEnrollResult(BaseModel):
+    """单图注册结果。ok=False 时 reasons 给出可读的拒绝原因。"""
+
+    ok: bool
+    quality: dict[str, Any] = {}
+    template_count: int = 0
+    person: dict[str, Any] | None = None
+    # 疑似重复：底库里已有相似度较高的人，提示是否合并而非新建
+    duplicate: dict[str, Any] | None = None
+    reasons: list[str] = []
+    detail: str = ""

@@ -72,10 +72,56 @@ async def _is_duplicate(camera_id: int | None, event_type: str, track_ids: list[
     return False
 
 
+# ---------------------------------------------------------------- 离线（视频文件）去重
+# 实时链路用墙上时钟做去重，但**离线视频分析跑得比实时快**（3 倍速以上），
+# 用墙上时钟会把视频里相隔几分钟的两次真实事件合并成一次；反过来，
+# 一次持续 30 秒的推搡在视频时间轴上本应被合并，用墙上时钟却会因为
+# "处理只花了 10 秒"而拆成好几条。两边都是错的。
+# 因此离线分析改用**视频时间轴**上的秒数做窗口判断，状态放进程内存
+# （任务结束即清理，不需要跨进程共享）。
+_offline_state: dict[str, float] = {}
+
+
+def _offline_dup(key: str, t: float, window: float) -> bool:
+    last = _offline_state.get(key)
+    if last is not None and 0.0 <= (t - last) < window:
+        return True
+    _offline_state[key] = t
+    return False
+
+
+def clear_offline_state(video_id: int) -> None:
+    """视频任务结束后回收其去重状态，避免长跑累积。"""
+    prefix = f"v{video_id}:"
+    for k in [k for k in _offline_state if k.startswith(prefix)]:
+        _offline_state.pop(k, None)
+
+
 def _bbox_str(bbox) -> str | None:
     if bbox is None:
         return None
     return ",".join(f"{float(v):.4f}" for v in bbox)
+
+
+def _persons_of(result: FrameResult, track_ids: list[int]) -> tuple[list[dict], dict | None]:
+    """从本帧轨迹里取出该行为涉及人员的已确认身份与情绪。
+
+    只有通过轨迹级投票确认过的身份才会出现在 ``track.meta["person"]``，
+    因此这里不会把"猜出来的名字"写进事件记录。
+    """
+    persons: list[dict] = []
+    emotion: dict | None = None
+    for tr in result.tracks:
+        if track_ids and tr.tid not in track_ids:
+            continue
+        p = tr.meta.get("person")
+        if p:
+            persons.append(p)
+        if emotion is None:
+            e = tr.meta.get("emotion")
+            if e:
+                emotion = e
+    return persons, emotion
 
 
 # ---------------------------------------------------------------- 多模态证据融合
@@ -116,6 +162,32 @@ async def _recent_speech_keywords(db: AsyncSession, camera_id: int | None,
     return words
 
 
+async def _offline_recent_speech(db: AsyncSession, video_id: int, t: float,
+                                 window_sec: float) -> list[str]:
+    """离线视频：与**视频时间 t** 相近的语音关键词（去重）。
+
+    与实时链路的关键差异：这里不能用 created_at（墙上时钟）比较 ——
+    音频是前端边解码边推送的，其入库时刻与视频里的实际时刻完全脱钩，
+    必须按 start_time（视频秒数）来对齐。
+    """
+    rows = (await db.execute(
+        select(ChatLog.hit_keywords)
+        .where(ChatLog.video_id == video_id)
+        .where(ChatLog.hit_keywords.isnot(None))
+        .where(ChatLog.start_time >= t - window_sec)
+        .where(ChatLog.start_time <= t + window_sec)
+        .order_by(ChatLog.id.desc())
+        .limit(20)
+    )).scalars().all()
+    words: list[str] = []
+    for raw in rows:
+        for w in str(raw).split("、"):
+            w = w.strip()
+            if w and w not in words:
+                words.append(w)
+    return words
+
+
 async def _recent_visual_events(db: AsyncSession, camera_id: int | None,
                                 window_sec: float) -> list[str]:
     """同点位最近若干秒内的霸凌类视觉事件标签（去重）。"""
@@ -142,9 +214,15 @@ async def process_frame(
     result: FrameResult,
     operator_id: int | None = None,
     frame_time: float = 0.0,
+    video_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """消费一帧的感知结果：落事件、裁定报警、固化取证、外发通知。"""
+    """消费一帧的感知结果：落事件、裁定报警、固化取证、外发通知。
+
+    ``video_id`` 非空表示这是离线视频分析：事件会挂到视频任务上，
+    且去重/冷却改用视频时间轴（详见 _offline_dup 的说明）。
+    """
     triggered: dict[str, Any] | None = None
+    offline = video_id is not None
 
     for hit in result.behaviors:
         # 隐私遮蔽：目标框中心落在遮蔽区内的，不产生事件、不落取证。
@@ -155,16 +233,34 @@ async def process_frame(
         meta = behavior_meta(hit.event_type)
         is_bullying = bool(meta["is_bullying"])
 
-        if not await _is_duplicate(camera_id, hit.event_type, hit.track_ids):
+        track_key = _track_key(hit.track_ids)
+        if offline:
+            dup = _offline_dup(f"v{video_id}:ev:{hit.event_type}:{track_key}",
+                               float(frame_time), settings.ALARM_MERGE_WINDOW_SEC)
+        else:
+            dup = await _is_duplicate(camera_id, hit.event_type, hit.track_ids)
+
+        if not dup:
+            # 离线视频把当时识别到的身份与情绪一并记进 detail：
+            # 事件表本身不存人员字段（它属于人员模块），而这几项恰恰是
+            # 事后复核时最有用的上下文（"是谁在什么情绪下被推"）。
+            detail_obj = dict(hit.detail or {})
+            if offline:
+                persons, emotion = _persons_of(result, hit.track_ids)
+                if persons:
+                    detail_obj["persons"] = persons
+                if emotion:
+                    detail_obj["emotion"] = emotion
             db.add(DetectionEvent(
                 camera_id=camera_id,
+                video_id=video_id,
                 event_type=hit.event_type,
                 label=str(meta["label"]),
                 confidence=float(hit.confidence),
                 frame_time=round(float(frame_time), 2),
                 bbox=_bbox_str(hit.bbox),
-                track_ids=_track_key(hit.track_ids),
-                detail=json.dumps(hit.detail, ensure_ascii=False),
+                track_ids=track_key,
+                detail=json.dumps(detail_obj, ensure_ascii=False),
                 is_bullying=is_bullying,
                 operator_id=operator_id,
             ))
@@ -176,7 +272,10 @@ async def process_frame(
             continue  # 聚集等只记事件
         if hit.confidence < settings.ALARM_MIN_CONFIDENCE:
             continue
-        if await _in_cooldown(camera_id, "video"):
+        if offline:
+            if _offline_dup(f"v{video_id}:cd:video", float(frame_time), settings.ALARM_COOLDOWN_SEC):
+                continue
+        elif await _in_cooldown(camera_id, "video"):
             continue
 
         # ---- 多模态证据融合 ----
@@ -184,7 +283,11 @@ async def process_frame(
         # 报警可信度显著提高；对应的，级别只升不降。
         speech_words: list[str] = []
         if settings.FUSION_ENABLED:
-            speech_words = await _recent_speech_keywords(db, camera_id, settings.FUSION_WINDOW_SEC)
+            if offline:
+                speech_words = await _offline_recent_speech(db, video_id, frame_time,
+                                                            settings.FUSION_WINDOW_SEC)
+            else:
+                speech_words = await _recent_speech_keywords(db, camera_id, settings.FUSION_WINDOW_SEC)
         multimodal = bool(speech_words)
 
         conf = float(hit.confidence)
@@ -261,10 +364,14 @@ async def process_speech(
     segment: SpeechSegment,
     hits: list[KeywordHit],
     operator_id: int | None = None,
+    video_id: int | None = None,
 ) -> dict[str, Any] | None:
     """消费一段语音转写：落库对话记录，命中关键词则裁定报警。
 
     ``segment.partial=True`` 的中间结果不参与报警，避免同一句话反复触发。
+
+    ``video_id`` 非空表示这是**离线视频的音频轨**：转写会挂到视频任务上
+    （start_time 即视频秒数），报警冷却改用视频时间轴判断。
     """
     if segment.partial:
         return None
@@ -273,11 +380,14 @@ async def process_speech(
     level = summary["level"]
     alarm_id: int | None = None
     triggered: dict[str, Any] | None = None
+    offline = video_id is not None
 
     # 只有 alarm 档才触发报警。词表扩到 3000+ 后，"命中即报警"会让误报泛滥 ——
     # "垃圾""你妈"在正常对话里也会出现。warn 档只记入对话流并做警告提示，
     # highlight 档仅高亮，两者都不生成报警记录，由前端分级标色呈现。
-    if level == "alarm" and not await _in_cooldown(camera_id, "audio"):
+    in_cd = (_offline_dup(f"v{video_id}:cd:audio", float(segment.start), settings.ALARM_COOLDOWN_SEC)
+             if offline else await _in_cooldown(camera_id, "audio"))
+    if level == "alarm" and not in_cd:
         # 档位 → 报警级别：能走到这里的只有 alarm 档，因此固定为最高级别
         alarm_level = "high"
 
@@ -291,6 +401,10 @@ async def process_speech(
 
         keyword_txt = "、".join(summary["keywords"])
         reason = f"语音关键词命中：{keyword_txt}｜“{segment.text}”"
+        if offline:
+            # 离线视频必须把时间点写进理由：事后看报警列表时，
+            # "出现在 03:12" 是唯一能定位到原始画面的线索。
+            reason = f"【视频 0{int(segment.start) // 60}:{int(segment.start) % 60:02d}】" + reason
         if multimodal:
             reason += f"；同期视觉亦检出：{'、'.join(visual_labels[:3])}"
 
@@ -309,7 +423,10 @@ async def process_speech(
         alarm_id = alarm.id
         db.add(EvidenceFile(alarm_id=alarm.id, kind="transcript", path=path, mime="text/plain"))
         await db.commit()
-        await _mark_alarm(camera_id, "audio")
+        # 离线分析不写实时冷却状态：否则一段视频里的语音报警会把该点位
+        # 之后几分钟的真实语音报警全部“冷却”掉（用户完全无法理解为什么没报警）
+        if not offline:
+            await _mark_alarm(camera_id, "audio")
 
         triggered = {
             "alarm_id": alarm.id,
@@ -328,6 +445,7 @@ async def process_speech(
 
     db.add(ChatLog(
         camera_id=camera_id,
+        video_id=video_id,
         alarm_id=alarm_id,
         speaker=segment.speaker,
         text=segment.text,

@@ -11,12 +11,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = "http://127.0.0.1:8000"
+# 允许用环境变量指向非默认端口（本机常有其他项目同时占用 8000）
+BASE = os.environ.get("CAB_CHECK_BASE", "http://127.0.0.1:8000").rstrip("/")
 
 
 def req(method: str, path: str, data: dict | None = None, token: str | None = None) -> tuple[int, dict]:

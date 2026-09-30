@@ -55,6 +55,16 @@ def _load() -> list[tuple[int | None, tuple[float, float, float, float]]]:
     return out
 
 
+def invalidate() -> None:
+    """参数变更后调用：清掉解析缓存，下次判定时重新读取配置。
+
+    遮蔽区只在首次使用时解析一次（判定跑在每帧的热路径上，不能反复 json.loads），
+    因此设置页改了区域之后必须显式失效，否则新区域不会生效。
+    """
+    global _zones
+    _zones = None
+
+
 def is_masked(bbox, camera_id: int | None) -> bool:
     """目标框中心落在任一遮蔽区内即视为被遮蔽。
 

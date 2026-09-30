@@ -15,8 +15,11 @@ from app.core.db import init_db
 from app.core.logbuffer import install as install_log_buffer
 from app.core.security import hash_password
 from app.models import Camera, User
-from app.routers import (alarms, auth, cameras, dashboard, detect, history, keywords,
-                         media, risk, system, video)
+from app.routers import (alarms, auth, cameras, compliance, dashboard, detect, faces, history,
+                         keywords, media, persons, risk, system, video)
+# 注意别名：模块名 settings 会与 core.config.settings 冲突，覆盖后所有
+# ``settings.XXX`` 都会取到模块对象，导致启动直接崩
+from app.routers import settings as settings_router
 from app.vision.engine import engine
 from app.vision.registry import registry
 
@@ -46,6 +49,7 @@ async def lifespan(app: FastAPI):
     await _purge_demo_cameras()
     await _load_runtime_config()
     await _seed_keywords()
+    await _load_face_index()
     await _warmup()
     tasks = _start_background_tasks()
     yield
@@ -68,6 +72,31 @@ async def _seed_keywords() -> None:
         count = await keyword_store.refresh(db)
     if added:
         log.info("关键词词库初始化完成：新增 %d 条，当前生效 %d 条", added, count)
+
+
+async def _load_face_index() -> None:
+    """启动时把人脸特征载入内存索引。
+
+    必须在 warmup 之前：实时识别的读路径是纯内存的，索引为空时识别会静默
+    返回"未匹配"（不报错，但一个都认不出来），属于最难排查的一类问题。
+    库为空（还没建档）时重建结果为空，属于正常状态。
+    """
+    from app.core.db import SessionLocal
+    # 注意：这里必须导入**单例对象**而不是模块。services/face_index.py 里
+    # 模块名与实例名同名，``from app.services import face_index`` 拿到的是模块，
+    # 调用 face_index.rebuild 会直接 AttributeError。
+    from app.services.face_index import face_index
+
+    if not settings.ENABLE_FACE_ID:
+        log.info("人脸识别已关闭（CAB_ENABLE_FACE_ID=false）")
+        return
+    try:
+        async with SessionLocal() as db:
+            count = await face_index.rebuild(db)
+        if count:
+            log.info("人脸索引已载入：%d 条模板", count)
+    except Exception as e:  # noqa: BLE001 —— 索引失败不应阻断启动
+        log.warning("人脸索引载入失败（识别功能暂不可用）：%s", e)
 
 
 async def _load_runtime_config() -> None:
@@ -217,6 +246,15 @@ app.include_router(media.router)
 app.include_router(risk.router)
 # 关键词管理（词表增删改查 + 三档响应）
 app.include_router(keywords.router)
+# 系统设置（可调参数的读取与修改，立即生效 + 落库持久化）
+app.include_router(settings_router.router)
+# 人员档案（学生 / 教师 / 管理人员）与班级
+app.include_router(persons.router)
+app.include_router(persons.classes_router)
+# 人脸建档与识别（单图注册 / 1:N 检索 / 索引维护）
+app.include_router(faces.router)
+# 合规与隐私（PIA 台账、审计查询、告知同意书、自查看板）
+app.include_router(compliance.router)
 
 # 取证文件不再以静态目录匿名暴露，统一经 /api/media/{path} 鉴权后返回
 

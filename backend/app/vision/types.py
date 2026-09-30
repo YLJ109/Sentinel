@@ -63,6 +63,9 @@ class Track:
     age: int = 0
     hits: int = 1
     misses: int = 0
+    # 轨迹确认门控：连续命中足够帧数后才置 True。
+    # 未确认的轨迹是"疑似目标"（多半是单帧误检），不参与渲染与行为判定。
+    confirmed: bool = False
     created_at: float = 0.0
     updated_at: float = 0.0
     hist: list[tuple[float, np.ndarray, np.ndarray | None]] = field(default_factory=list)

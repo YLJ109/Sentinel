@@ -23,9 +23,11 @@ import numpy as np
 from app.core.config import settings
 from app.core.runtime_config import runtime_config
 from app.vision.behaviors import BehaviorAnalyzer, BehaviorHit
+from app.vision.emotion import EmotionSmoother, emotion_estimator
 from app.vision.face import face_detector
+from app.vision.face_id import face_id
 from app.vision.registry import registry
-from app.vision.tracker import IoUTracker
+from app.vision.tracker import IoUTracker, PeopleCounter
 from app.vision.types import Detection, Track
 
 log = logging.getLogger("vision.engine")
@@ -53,6 +55,12 @@ class CameraPipeline:
     camera_id: int | None = None
     tracker: IoUTracker = field(default_factory=IoUTracker)
     analyzer: BehaviorAnalyzer = field(default_factory=BehaviorAnalyzer)
+    # 人数统计：中位数滤波 + 不对称迟滞，避免画面人数上下跳
+    people_counter: PeopleCounter = field(default_factory=PeopleCounter)
+    # 人脸识别的节流计数：识别（特征+检索）比检测贵一个量级，不能每帧都做
+    face_tick: int = 0
+    # 情绪平滑器：按轨迹做 EMA + 多数投票，纯内存、不落库
+    emotion: EmotionSmoother = field(default_factory=EmotionSmoother)
     last_infer_at: float = 0.0
     frames: int = 0
     infer_ms_ema: float = 0.0
@@ -73,6 +81,33 @@ def camera_pipeline_key(camera_id: int | None) -> str:
 def video_pipeline_key(record_id: int) -> str:
     """视频文件分析使用独立管线，避免与实时链路互相 reset。"""
     return f"video:{record_id}"
+
+
+# 渲染宽限：轨迹丢失后仍用卡尔曼预测框继续渲染的帧数。
+# 检测偶发丢帧时框不会立刻消失（前端还有一层平滑跟随），避免"闪框"。
+RENDER_GRACE_FRAMES = 2
+
+
+def visible_tracks(pipe: CameraPipeline) -> list[Track]:
+    """对外可见的轨迹：已通过确认门控，且不是长时间未观测的陈旧轨迹。"""
+    return [tr for tr in pipe.tracker.tracks.values()
+            if tr.confirmed and tr.misses <= RENDER_GRACE_FRAMES]
+
+
+def raw_people(pipe: CameraPipeline) -> int:
+    """本帧的原始人数：已确认且本帧确有检测的轨迹数。"""
+    return len([tr for tr in pipe.tracker.tracks.values() if tr.confirmed and tr.misses == 0])
+
+
+def _face_index():
+    """延迟导入人脸索引。
+
+    走函数内导入而不是模块顶层：``app.services`` 下的模块会反向引用 vision 包，
+    顶层导入在将来重构时很容易演化成循环导入，这里保持单向依赖。
+    """
+    from app.services.face_index import face_index
+
+    return face_index
 
 
 class VisionEngine:
@@ -238,6 +273,9 @@ class VisionEngine:
             except Exception as e:
                 log.warning("人脸检测失败：%s", e)
 
+        # 识别与情绪都挂在这一步之后：没有人脸框就没有对齐输入，也就没有特征
+        self._process_faces(pipe, frame, faces, tracks)
+
         infer_ms = (time.perf_counter() - started) * 1000.0
         pipe.infer_ms_ema = infer_ms if pipe.frames == 1 else 0.85 * pipe.infer_ms_ema + 0.15 * infer_ms
         pipe.last_behaviors = behaviors
@@ -246,25 +284,175 @@ class VisionEngine:
         pipe.last_faces_at = t
 
         return FrameResult(
-            camera_id=camera_id, timestamp=t, tracks=tracks, behaviors=behaviors,
+            camera_id=camera_id, timestamp=t,
+            tracks=visible_tracks(pipe), behaviors=behaviors,
             faces=faces,
-            people=len([x for x in tracks if x.misses == 0]),
+            people=pipe.people_counter.push(raw_people(pipe)),
             infer_ms=round(infer_ms, 1),
             motion=round(motion, 2),
         )
+
+    def _process_faces(self, pipe: CameraPipeline, frame: np.ndarray,
+                       faces: list[dict], tracks: list[Track]) -> None:
+        """人脸识别 + 情绪识别 + 人脸↔人体轨迹绑定。
+
+        三个设计要点：
+
+        **① 节流。** 检测每帧都做（YuNet 约 5ms），但识别（SFace 对齐 + 128 维
+        特征 + 检索）贵一个量级，因此按 ``FACE_RECOGNIZE_EVERY`` 节流。
+        另按人脸框面积排序优先识别**大脸** —— 远处的脸本来就识别不准，
+        把算力花在最近的人身上，有效召回反而更高。
+
+        **② 轨迹级确认。** 单帧识别可能是错的，绝不能一命中就把姓名贴到人身上。
+        这里用 ``Track.meta["pid_votes"]`` 做连续票确认，达到阈值才写入姓名；
+        未达阈值时前端只显示"未识别"，宁可不显示也不能显示错的名字。
+
+        **③ 失败关闭。** 识别模型缺失、索引为空、索引过期（刚发生过增删）时，
+        一律不产生姓名，只保留检测框。功能降级，但不产生错误身份。
+        """
+        # raw 是 numpy 数组，必须在返回前剔除，否则 WebSocket JSON 序列化会直接失败
+        try:
+            enabled = (settings.ENABLE_FACE_ID and runtime_config.capability("face_id")
+                       and face_id.ready and faces)
+            if not enabled:
+                return
+
+            face_index = _face_index()
+            if face_index.status().get("dirty"):
+                return   # 索引过期期间不识别（fail-closed）
+
+            pipe.face_tick += 1
+            every = max(1, int(settings.FACE_RECOGNIZE_EVERY))
+            if pipe.face_tick % every != 0:
+                return
+
+            emotion_on = (settings.ENABLE_EMOTION and runtime_config.capability("emotion")
+                          and emotion_estimator.ready)
+            emotion_every = max(1, int(settings.EMOTION_EVERY))
+            want_emotion = emotion_on and (pipe.face_tick // every) % emotion_every == 0
+
+            def area(f: dict) -> float:
+                b = f["bbox"]
+                return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+            ordered = sorted(faces, key=area, reverse=True)[: max(1, int(settings.FACE_RECOGNIZE_MAX))]
+            alive: set[int] = set()
+            for f in ordered:
+                raw = f.get("raw")
+                if raw is None:
+                    continue
+                aligned = face_id.align(frame, np.asarray(raw, dtype=np.float32))
+                if aligned is None:
+                    continue
+
+                track = self._match_track(tracks, f["bbox"])
+                if track is not None:
+                    alive.add(track.tid)
+
+                vec = face_id.feature_from_aligned(aligned)
+                if vec is not None:
+                    decision = face_index.identify(
+                        vec, threshold=settings.FACE_MATCH_THRESHOLD,
+                        margin=settings.FACE_MATCH_MARGIN)
+                    if decision.get("matched") and track is not None:
+                        self._vote_identity(track, decision)
+                    f["match"] = {
+                        "matched": bool(decision.get("matched")),
+                        "reason": decision.get("reason", ""),
+                        "score": decision.get("score"),
+                    }
+
+                if want_emotion:
+                    probs = emotion_estimator.infer(aligned)
+                    if probs is not None:
+                        if track is not None:
+                            res = pipe.emotion.update(track.tid, probs)
+                            if res is not None:
+                                track.meta["emotion"] = res.as_dict()
+                        else:
+                            # 未绑定到轨迹时无法做时序平滑，退化为单帧结果；
+                            # 单帧情绪抖动大，因此只给置信度足够高的结果
+                            from app.vision.emotion import EMOTIONS
+
+                            idx = int(np.argmax(probs))
+                            if float(probs[idx]) >= settings.EMOTION_CONF_MIN:
+                                key, label, icon = EMOTIONS[idx]
+                                f["emotion"] = {"key": key, "label": label, "icon": icon,
+                                                "confidence": round(float(probs[idx]), 3)}
+
+            # 把已确认的身份/情绪回填到人脸框，前端可直接在人脸上打名字
+            for f in faces:
+                track = self._match_track(tracks, f["bbox"])
+                if track is None:
+                    continue
+                if "person" not in f and track.meta.get("person"):
+                    f["person"] = track.meta["person"]
+                if "emotion" not in f and track.meta.get("emotion"):
+                    f["emotion"] = track.meta["emotion"]
+
+            pipe.emotion.gc(alive or {t.tid for t in tracks})
+        except Exception as e:  # noqa: BLE001 —— 识别失败绝不能中断检测与报警
+            log.warning("人脸识别处理失败：%s", e)
+        finally:
+            for f in faces:
+                f.pop("raw", None)
+
+    @staticmethod
+    def _match_track(tracks: list[Track], face_bbox: list[float]) -> Track | None:
+        """把人脸框关联到人体轨迹：人脸中心落在人体框的**上半部**才算命中。
+
+        只判"落在框内"是不够的 —— 前后两人重叠时，后排的人脸会落进前排的框里，
+        于是姓名会贴错人。要求落点靠近人体框上部（头部应在的位置）能大幅减少这种串号，
+        再用"离理想头部位置最近"来打破同框多人的歧义。
+        """
+        cx = (face_bbox[0] + face_bbox[2]) / 2
+        cy = (face_bbox[1] + face_bbox[3]) / 2
+        best: Track | None = None
+        best_d = 1e9
+        for tr in tracks:
+            if tr.misses > 0:
+                continue
+            bx = tr.bbox
+            w = max(1e-6, float(bx[2] - bx[0]))
+            h = max(1e-6, float(bx[3] - bx[1]))
+            # 允许一点外扩：人脸框有时会略超出人体框上沿
+            if not (bx[0] - 0.02 * w <= cx <= bx[2] + 0.02 * w):
+                continue
+            if not (bx[1] - 0.08 * h <= cy <= bx[1] + 0.55 * h):
+                continue
+            ideal_y = bx[1] + 0.16 * h
+            d = abs(cy - ideal_y)
+            if d < best_d:
+                best_d, best = d, tr
+        return best
+
+    @staticmethod
+    def _vote_identity(track: Track, decision: dict) -> None:
+        """轨迹级身份投票：连续 N 次一致才确认，避免单帧误识直接贴名字。"""
+        summary = decision.get("summary") or {}
+        if not summary:
+            return
+        key = f"{summary.get('owner_type')}:{summary.get('person_id')}"
+        votes: dict[str, int] = track.meta.setdefault("pid_votes", {})
+        votes[key] = votes.get(key, 0) + 1
+        # 竞争者衰减：中途换了识别结果时，票数此消彼长，短时抖动无法累积成确认
+        for k in list(votes):
+            if k != key:
+                votes[k] = max(0, votes[k] - 1)
+        if votes[key] >= int(settings.FACE_CONFIRM_VOTES):
+            track.meta["person"] = summary
 
     def _cached(self, pipe: CameraPipeline, camera_id: int | None, t: float,
                 reason: str, motion: float = 0.0) -> FrameResult:
         """跳过推理时复用上次轨迹与行为结果，保证前端画面稳定。"""
         fresh = (t - pipe.last_behaviors_at) <= self.BEHAVIOR_CACHE_TTL
         faces_fresh = (t - pipe.last_faces_at) <= self.BEHAVIOR_CACHE_TTL
-        tracks = [tr for tr in pipe.tracker.tracks.values() if tr.misses == 0]
         return FrameResult(
             camera_id=camera_id, timestamp=t,
-            tracks=tracks,
+            tracks=visible_tracks(pipe),
             behaviors=list(pipe.last_behaviors) if fresh else [],
             faces=list(pipe.last_faces) if faces_fresh else [],
-            people=len(tracks),
+            people=pipe.people_counter.push(raw_people(pipe)),
             infer_ms=0.0, skipped=True, skip_reason=reason, motion=round(motion, 2),
         )
 

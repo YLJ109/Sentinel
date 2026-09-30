@@ -26,6 +26,8 @@ from app.schemas import CapabilityToggle, DeviceSwitch, LogQueryOut, SystemModel
 from app.services import alarm as alarm_svc
 from app.vision.engine import engine
 from app.vision.face import face_detector
+from app.vision.face_id import face_id
+from app.vision.emotion import emotion_estimator
 from app.vision.registry import registry
 
 router = APIRouter(prefix="/api/system", tags=["系统"])
@@ -33,8 +35,9 @@ log = logging.getLogger("routers.system")
 
 # 人脸检测后端的中文说明（供状态栏 tooltip 显示）
 FACE_BACKEND_ZH = {
+    "yunet": "OpenCV YuNet（含 5 点关键点）",
     "yolo": "YOLO 人脸模型",
-    "haar": "OpenCV 级联（可换 YOLO 权重提升召回）",
+    "haar": "OpenCV 级联（可换 YuNet / YOLO 权重提升召回）",
 }
 
 
@@ -57,6 +60,13 @@ def _capabilities() -> list[dict]:
     face_st = face_detector.status()
     face_ok = bool(face_st.get("ready"))
 
+    # 人脸识别与情绪识别：三者权重各自独立，任一缺失只影响对应能力
+    id_st = face_id.status()
+    emo_st = emotion_estimator.status()
+    from app.services.face_index import face_index
+
+    idx_st = face_index.status()
+
     def detail(*parts: str | None) -> str:
         return " · ".join([p for p in parts if p])
 
@@ -78,6 +88,26 @@ def _capabilities() -> list[dict]:
             "key": "face", "label": "人脸检测", "group": "vision",
             "ready": face_ok, "degraded": face_st.get("backend") == "haar",
             "detail": FACE_BACKEND_ZH.get(str(face_st.get("backend")), str(face_st.get("error") or "不可用")),
+        },
+        # 人脸识别与情绪识别是独立于「人脸检测」的两级能力：
+        # 检测只需 YuNet 权重，识别还需 SFace 特征模型，因此就绪状态必须分开展示 —— 
+        # 权重缺失时用户看到的是"人脸检测正常、人脸识别未就绪"，才知道该去下哪个文件。
+        {
+            "key": "face_id", "label": "人脸识别", "group": "vision",
+            "ready": bool(id_st.get("ready")) and settings.ENABLE_FACE_ID,
+            "degraded": not settings.ENABLE_FACE_ID,
+            "detail": (f"SFace {id_st.get('dim')} 维 · 底库 {idx_st.get('persons')} 人"
+                       if id_st.get("ready")
+                       else ("已在配置中关闭" if not settings.ENABLE_FACE_ID
+                             else str(id_st.get("error") or "未加载"))),
+        },
+        {
+            "key": "emotion", "label": "情绪识别", "group": "vision",
+            "ready": bool(emo_st.get("ready")) and settings.ENABLE_EMOTION,
+            "degraded": not settings.ENABLE_EMOTION,
+            "detail": ("FER+ 8 类 · 实时展示不落库" if emo_st.get("ready")
+                       else ("已在配置中关闭" if not settings.ENABLE_EMOTION
+                             else str(emo_st.get("error") or "未加载"))),
         },
         {
             "key": "fall", "label": "跌倒检测", "group": "behavior",

@@ -1,6 +1,11 @@
-"""视频文件检测：上传、后台逐帧真实推理、进度与结果查询。"""
+"""视频文件检测：上传、后台逐帧真实推理、进度与结果查询。
+
+除任务记录本身外，还提供**时间轴增量接口**（事件 / 语音转写）：
+前端在检测过程中轮询它们，把"右边实时输出"做成与实时检测一致的体验。
+"""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -12,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import get_current_user, require_role
-from app.models import User, VideoRecord
+from app.models import ChatLog, DetectionEvent, User, VideoRecord
 from app.schemas import VideoRecordOut
 from app.services.video_pipeline import process_video
 
@@ -89,3 +94,77 @@ async def get_video(vid: int, db: AsyncSession = Depends(get_db), _: User = Depe
     if rec is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "记录不存在")
     return rec
+
+
+# ---------------------------------------------------------------- 时间轴增量输出
+# 前端在检测过程中每 1.5 秒拉一次这两个接口，实现"右侧实时输出"。
+# 用 since_id 做增量而不是每次全量：一条 10 分钟的视频可能产生上千条事件，
+# 全量传输会让前端每秒重渲染整张列表，既卡又看不到"新进来"的动效。
+@router.get("/{vid}/events")
+async def video_events(
+    vid: int,
+    since_id: int = 0,
+    limit: int = 300,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    rec = await db.get(VideoRecord, vid)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "记录不存在")
+    rows = (await db.execute(
+        select(DetectionEvent)
+        .where(DetectionEvent.video_id == vid, DetectionEvent.id > since_id)
+        .order_by(DetectionEvent.id)
+        .limit(max(1, min(1000, limit)))
+    )).scalars().all()
+    items = [{
+        "id": r.id,
+        "t": round(float(r.frame_time or 0.0), 2),
+        "event_type": r.event_type,
+        "label": r.label,
+        "confidence": round(float(r.confidence or 0.0), 3),
+        "is_bullying": bool(r.is_bullying),
+        "track_ids": [int(x) for x in str(r.track_ids or "").split(",") if x.strip().isdigit()],
+        "detail": _safe_json(r.detail),
+    } for r in rows]
+    return {"items": items, "last_id": items[-1]["id"] if items else since_id,
+            "status": rec.status, "progress": round(float(rec.progress or 0.0), 4)}
+
+
+@router.get("/{vid}/speech")
+async def video_speech(
+    vid: int,
+    since_id: int = 0,
+    limit: int = 300,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    rec = await db.get(VideoRecord, vid)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "记录不存在")
+    rows = (await db.execute(
+        select(ChatLog)
+        .where(ChatLog.video_id == vid, ChatLog.id > since_id)
+        .order_by(ChatLog.id)
+        .limit(max(1, min(1000, limit)))
+    )).scalars().all()
+    items = [{
+        "id": r.id,
+        "start": round(float(r.start_time or 0.0), 2),
+        "end": round(float(r.end_time or 0.0), 2),
+        "text": r.text,
+        "hit_keywords": [w for w in str(r.hit_keywords or "").split("、") if w],
+        "confidence": round(float(r.confidence or 0.0), 3),
+        "alarm_id": r.alarm_id,
+    } for r in rows]
+    return {"items": items, "last_id": items[-1]["id"] if items else since_id}
+
+
+def _safe_json(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else {}
+    except (ValueError, TypeError):
+        return {}

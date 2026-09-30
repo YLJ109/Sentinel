@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audio.asr import asr
-from app.audio.keywords import scan
+from app.audio.keywords import scan, summarize
 from app.core.config import behavior_meta, settings
 from app.core.db import SessionLocal, get_db
 from app.core.deps import get_current_user
@@ -75,6 +75,10 @@ def _tracks_to_boxes(result: FrameResult) -> list[dict]:
             "is_bullying": False,
             "kpts": None if tr.kpts is None else [[round(float(a), 4), round(float(b), 4), round(float(c), 2)]
                                                   for a, b, c in tr.kpts],
+            # 身份与情绪只在"轨迹级确认"之后才存在，未确认时为 None，
+            # 前端据此显示"未识别人员"，绝不猜测
+            "person": tr.meta.get("person"),
+            "emotion": tr.meta.get("emotion"),
         })
     return out
 
@@ -212,6 +216,9 @@ async def ws_audio(websocket: WebSocket):
 
     session = asr.open_session()
     camera_id: int | None = None
+    # 离线视频模式：前端把视频音频轨解码后按同样协议推上来，
+    # 这里只多记一个 video_id，转写与报警就都挂到该视频任务上。
+    video_id: int | None = None
 
     async def emit(segment) -> None:
         hits = scan(segment.text) if runtime_config.capability("keyword") else []
@@ -219,8 +226,12 @@ async def ws_audio(websocket: WebSocket):
         if not segment.partial and segment.text:
             async with SessionLocal() as db:
                 triggered = await alarm_svc.process_speech(
-                    db, camera_id, segment, hits, operator_id=int(user_id)
+                    db, camera_id, segment, hits, operator_id=int(user_id),
+                    video_id=video_id,
                 )
+        # 逐词下发档位，前端才能做「命中词局部高亮 + 三档着色」。
+        # 只给 keywords 列表的话前端无法区分 alarm / warn / highlight，
+        # 用户在几千条词表下会看到满屏同色高亮，等于没有分级提示。
         await websocket.send_json({
             "type": "partial" if segment.partial else "final",
             "text": segment.text,
@@ -228,6 +239,9 @@ async def ws_audio(websocket: WebSocket):
             "start": segment.start,
             "end": segment.end,
             "keywords": [h.keyword for h in hits],
+            "hits": [{"w": h.keyword, "lv": h.level, "cat": h.category, "d": h.distance}
+                     for h in hits],
+            "level": summarize(hits)["level"],
             "alarm": triggered,
         })
 
@@ -257,6 +271,19 @@ async def ws_audio(websocket: WebSocket):
                     continue
                 if "camera_id" in ctrl:
                     camera_id = ctrl["camera_id"]
+                # video_id 一旦设置就不再清空：它标识"本次连接属于哪个离线任务"，
+                # 前端不会在会话中途切换到另一个任务。
+                # 顺带把该视频关联的点位补齐，这样语音报警也能归属到正确点位，
+                # 并参与"视觉+语音"的多模态互证。
+                if ctrl.get("video_id"):
+                    video_id = int(ctrl["video_id"])
+                    if camera_id is None:
+                        from app.models import VideoRecord
+
+                        async with SessionLocal() as vdb:
+                            rec = await vdb.get(VideoRecord, video_id)
+                        if rec is not None:
+                            camera_id = rec.camera_id
                 if ctrl.get("flush"):
                     for segment in await session.finalize():
                         await emit(segment)

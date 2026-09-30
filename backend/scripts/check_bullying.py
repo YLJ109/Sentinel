@@ -70,8 +70,10 @@ def run_scenario(pos_a: Callable[[int], float], pos_b: Callable[[int], float],
                  nose_drop_a: float = 0.0, nose_drop_b: float = 0.0) -> list:
     """逐帧推进一个场景，返回最后一帧的行为判定列表。"""
     analyzer = BehaviorAnalyzer()
-    ta = Track(tid=1, bbox=np.zeros(4), kpts=None, conf=0.9)
-    tb = Track(tid=2, bbox=np.zeros(4), kpts=None, conf=0.9)
+    # confirmed=True：这两个轨迹是手工构造的"已确认目标"，
+    # 真实链路里由跟踪器的连续命中门控置位（见 vision/tracker.py）
+    ta = Track(tid=1, bbox=np.zeros(4), kpts=None, conf=0.9, confirmed=True)
+    tb = Track(tid=2, bbox=np.zeros(4), kpts=None, conf=0.9, confirmed=True)
     hits: list = []
     for i in range(FRAMES):
         t = i * DT

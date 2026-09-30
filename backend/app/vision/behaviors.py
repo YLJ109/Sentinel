@@ -247,7 +247,10 @@ class BehaviorAnalyzer:
     # ---------- 对外入口 ----------
     def analyze(self, tracks: list[Track], extra_dets: list[Detection] | None = None) -> list[BehaviorHit]:
         hits: list[BehaviorHit] = []
-        people = [t for t in tracks if t.misses == 0]
+        # 只对"本帧确有检测、且已通过确认门控"的轨迹做判定：
+        # 未确认轨迹多是单帧误检，丢失轨迹用的是预测框（位置正确但没有真实观测），
+        # 两者参与判定都会直接制造误报。
+        people = [t for t in tracks if t.misses == 0 and t.confirmed]
 
         if runtime_config.capability("crowd"):
             hits.extend(self._crowd(people))
@@ -264,7 +267,20 @@ class BehaviorAnalyzer:
                     hits.append(smoke)
 
         if runtime_config.capability("fight") or runtime_config.capability("argue"):
-            hits.extend(self._pairs(people))
+            pair_hits = self._pairs(people)
+            # 群体欺凌要先于两两结果落地：它是"两两对称性分析失效"场景的兜底，
+            # 因此若已判定为群体围困，同帧里被该群体包含的两两打斗结果就不再重复上报
+            # （否则一次围殴会同时产生"4 条对等打架 + 1 条群体欺凌"，报警列表被淹没）。
+            group_hits = self._group_bullying(people) if runtime_config.capability("fight") else []
+            if group_hits:
+                covered = [set(h.track_ids) for h in group_hits]
+                pair_hits = [
+                    h for h in pair_hits
+                    if not (h.event_type in ("fight", "bullying")
+                            and any(set(h.track_ids) <= c for c in covered))
+                ]
+            hits.extend(group_hits)
+            hits.extend(pair_hits)
 
         hits = self._fuse_model_hits(hits, self._model_behaviors(extra_dets))
         self._decay_pairs(people)
@@ -366,6 +382,70 @@ class BehaviorAnalyzer:
             "smoke", round(conf, 3), [tr.tid], tr.bbox.copy(),
             {"hand_head_ratio": round(best, 3), "hand": best_side, "votes": votes},
         )
+
+    # ---------- 群体欺凌：多人围困一人 ----------
+    def _group_bullying(self, people: list[Track]) -> list[BehaviorHit]:
+        """判断是否存在"多人同时对同一人动手"的群体欺凌。
+
+        为什么两两对称性分析在这里必然失效：真实围殴里几名攻击者动作幅度都不小、
+        也都不退缩，于是**任意两人看都是"对等冲突"**，整体被降级成普通打架 ——
+        实测三个真实素材全部如此，最该报警的情形反而没报。
+
+        改用图结构判别，但**边取自跨帧累积的打斗证据**（``_pair_votes``），
+        而不是单帧的姿态朝向。原因是实测发现：围殴时攻击者是轮流动手的，
+        某一帧里往往只有一个人抬着手，靠单帧朝向连边会得到一条随帧抖动的断链；
+        而"最近若干帧内这几个人彼此打过"是稳定得多的证据。
+
+        图形态即为判据：
+            群体围殴：攻击者各自与受害者相连、彼此之间不与对方冲突 → 星型图
+            混战互殴：攻击者之间也互相开打 → 密集团，没有明确的中心
+        因此"邻接度 ≥ 2 且邻居之间几乎无边"指向一个被多人同时卷入的个体。
+        该判据不引入任何新模型，且"星型 vs 完全图"可以用一张图向评委讲清楚。
+        """
+        if len(people) < settings.GROUP_BULLY_MIN_ATTACKERS + 1:
+            return []
+
+        alive = {t.tid for t in people}
+        adj: dict[int, set[int]] = {t.tid: set() for t in people}
+        for (i, j, event), cnt in list(self._pair_votes.items()):
+            if event != "fight" or i == j:
+                continue
+            if i not in alive or j not in alive:
+                continue
+            if cnt >= settings.GROUP_BULLY_EDGE_FRAMES:
+                adj[i].add(j)
+                adj[j].add(i)
+
+        hits: list[BehaviorHit] = []
+        by_tid = {t.tid: t for t in people}
+        for center in people:
+            # key 用 (tid, tid)：真实配对键是 (小, 大) 且小 < 大，不会冲突；
+            # 同时 _decay_pairs 按"任一方消失即回收"的规则仍能正确清理它
+            key = (center.tid, center.tid)
+            nbrs = adj[center.tid]
+            if len(nbrs) < settings.GROUP_BULLY_MIN_ATTACKERS:
+                self._vote_pair(key, "group", False)
+                continue
+
+            n = len(nbrs)
+            possible = n * (n - 1) / 2
+            edges = sum(1 for x in nbrs for y in nbrs if x < y and y in adj[x])
+            cohesion = edges / possible if possible else 0.0
+            ok = cohesion <= settings.GROUP_BULLY_MAX_COHESION
+            votes = self._vote_pair(key, "group", ok)
+            if not ok or votes < settings.GROUP_BULLY_MIN_FRAMES:
+                continue
+
+            attackers = sorted(nbrs)
+            box = self._union_box([center.bbox] + [by_tid[t].bbox for t in attackers])
+            # 内聚度越低（攻击者越"一致对外"）置信度越高
+            conf = round(min(0.96, 0.66 + 0.05 * n + 0.12 * (1.0 - cohesion)), 3)
+            hits.append(BehaviorHit(
+                "bullying", conf, [center.tid] + attackers, box,
+                {"group": True, "group_size": n, "cohesion": round(cohesion, 2),
+                 "center": center.tid, "others": attackers, "votes": votes},
+            ))
+        return hits
 
     # ---------- 双人：打架 / 争吵 ----------
     def _pairs(self, people: list[Track]) -> list[BehaviorHit]:

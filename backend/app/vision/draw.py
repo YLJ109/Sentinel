@@ -21,6 +21,11 @@ COLORS: dict[str, tuple[int, int, int]] = {
 _WHITE = (240, 245, 250)
 _DARK = (18, 14, 10)
 
+# 渲染宽限：与 engine.RENDER_GRACE_FRAMES 保持一致。
+# 丢失 1~2 帧的目标仍用卡尔曼预测框画出（画细一点以示"预测"），
+# 否则视频回放里框会随检测抖动一帧一闪。
+_GRACE = 2
+
 
 def _color(event: str) -> tuple[int, int, int]:
     return COLORS.get(event, COLORS["person"])
@@ -47,16 +52,17 @@ def annotate(
             _draw_box(img, b.bbox, w, h, _color(b.event_type), f"{_label(b)} {b.confidence:.2f}")
 
     for tr in tracks:
-        if tr.misses > 0:
+        if tr.misses > _GRACE:
             continue
+        predicted = tr.misses > 0
         hit = tag.get(tr.tid)
         color = _color(hit.event_type) if hit else _color("person")
         if hit:
             _pulse_box(img, tr.bbox, w, h, color)
         else:
-            _draw_box(img, tr.bbox, w, h, color, None)
-        _draw_label(img, tr.bbox, w, h, f"#{tr.tid} " + (f"{_label(hit)} {hit.confidence:.2f}" if hit else "person"), color)
-        if show_skeleton and tr.kpts is not None:
+            _draw_box(img, tr.bbox, w, h, color, None, thickness=1 if predicted else 2)
+        _draw_label(img, tr.bbox, w, h, _person_label(tr, hit), color)
+        if show_skeleton and tr.kpts is not None and not predicted:
             _draw_skeleton(img, tr.kpts, w, h, color)
 
     if show_hud:
@@ -70,14 +76,34 @@ def _label(hit: BehaviorHit) -> str:
     return str(behavior_meta(hit.event_type)["label"])
 
 
+def _person_label(tr: Track, hit: BehaviorHit | None) -> str:
+    """轨迹标签：已识别人脸时用「姓名·班级」替代匿名编号。
+
+    未识别（或未授权、未建档）时退化为 ``#编号``，这既是数据最小化的体现，
+    也避免在视频取证里给身份不明的人贴上错误信息。
+    """
+    person = tr.meta.get("person") or {}
+    who = ""
+    if person.get("name"):
+        who = str(person["name"])
+        if person.get("class_name"):
+            who += f"·{person['class_name']}"
+    else:
+        who = f"#{tr.tid}"
+
+    if hit:
+        return f"{who} {_label(hit)} {hit.confidence:.2f}"
+    return f"{who} person" if not person.get("name") else who
+
+
 def _to_px(bbox: np.ndarray, w: int, h: int) -> tuple[int, int, int, int]:
     x1, y1, x2, y2 = bbox
     return int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
 
 
-def _draw_box(img, bbox, w, h, color, label: str | None) -> None:
+def _draw_box(img, bbox, w, h, color, label: str | None, thickness: int = 2) -> None:
     x1, y1, x2, y2 = _to_px(bbox, w, h)
-    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
     if label:
         _text(img, label, (x1, max(14, y1 - 6)), color)
 
@@ -127,7 +153,7 @@ def _draw_hud(img, tracks: list[Track], behaviors: list[BehaviorHit]) -> None:
     cv2.rectangle(overlay, (0, 0), (w, bar_h), (10, 14, 22), -1)
     cv2.addWeighted(overlay, 0.72, img[0:bar_h, 0:w], 0.28, 0, img[0:bar_h, 0:w])
 
-    people = len([t for t in tracks if t.misses == 0])
+    people = len([t for t in tracks if t.misses == 0 and t.confirmed])
     cv2.putText(img, f"CAMPUS SENTINEL  PEOPLE:{people}", (12, 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 214, 47), 1, cv2.LINE_AA)
 

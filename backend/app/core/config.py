@@ -100,6 +100,38 @@ class Settings(BaseSettings):
     FACE_MIN_RATIO: float = 0.06         # 最小人脸边长占画面短边比例（Haar 用）
     FACE_MAX_FACES: int = 30             # 单帧最多标注的人脸数
 
+    # ===== 人脸识别（1:N 身份检索，与上面的"仅检测"是两件事）=====
+    # 引擎选用 OpenCV SFace（Apache 2.0，可商用）：特征 128 维、权重约 37MB，
+    # 与已用的 YuNet 同源，且 YuNet 输出的 5 个人脸关键点正好是 SFace
+    # alignCrop() 需要的对齐输入 —— 无需新增检测模型、无需手写相似变换。
+    ENABLE_FACE_ID: bool = True
+    FACE_SFACE_MODEL: str = "face_recognition_sface_2021dec.onnx"
+    FACE_RECOGNIZE_EVERY: int = 3        # 每 N 次检测做一次识别（识别远贵于检测）
+    FACE_RECOGNIZE_MAX: int = 6          # 单帧最多识别张数（按人脸框面积优先取大脸）
+    FACE_MATCH_THRESHOLD: float = 0.42   # 余弦相似度阈值（SFace 官方 0.363，此处更保守）
+    # top1 与 top2 的最小间隔：两家相似度接近时说明存在混淆（双胞胎、相似衣着），
+    # 此时返回"不确定"比猜一个名字更安全 —— 张冠李戴在校园场景是严重事故。
+    FACE_MATCH_MARGIN: float = 0.06
+    FACE_CONFIRM_VOTES: int = 3          # 轨迹级确认票数（连续 N 次识别一致才写姓名）
+    FACE_MIN_FACE_PX: int = 100          # 注册照人脸最小边长（像素）
+    FACE_MIN_SHARPNESS: float = 60.0     # 注册照清晰度下限（Laplacian 方差）
+    FACE_MAX_POSE_RATIO: float = 0.45    # 正脸约束：双眼中点相对人脸中心的水平偏移上限
+    FACE_PHOTO_KEEP: bool = True         # 是否保留注册原图（关闭则只留特征与头像）
+
+    # ===== 情绪识别（FER+，纯实时展示，不落库）=====
+    # 情绪只作为值班台的实时辅助线索：不写入学生档案、不参与任何评价，
+    # 界面必须标注"仅供参考，非心理诊断"。落库开关刻意不提供 —— 见合规设计。
+    ENABLE_EMOTION: bool = True
+    EMOTION_MODEL: str = "emotion-ferplus-8.onnx"
+    EMOTION_EVERY: int = 2               # 每 N 次人脸识别附带做一次情绪
+    EMOTION_CONF_MIN: float = 0.40       # 低于该置信度归为"中性/不确定"
+    EMOTION_EMA_ALPHA: float = 0.25      # 轨迹级情绪概率的滑动平均系数
+    EMOTION_VOTE_WINDOW: int = 8         # 多数投票窗口（帧）
+
+    # ===== 人员与人脸数据留存 =====
+    # 人脸注册照与头像目录（位于本机 data/ 下，按合规要求不上传互联网）
+    FACE_PHOTO_DIRNAME: str = "faces"
+
     # ===== 推理性能 =====
     # 实时流每秒最多推理帧数（同一路多个观看者共享该限频窗口）。
     # 前端固定按 10fps（每 100ms 一帧）送检，这里留到 12 是刻意为之：
@@ -147,6 +179,14 @@ class Settings(BaseSettings):
     BULLY_FLEE_WEIGHT: float = 0.30
     BULLY_CHASE_WEIGHT: float = 0.22
     BULLY_SUPPRESS_WEIGHT: float = 0.14
+
+    # ===== 群体欺凌：多人同时对同一人动手 =====
+    # 真实校园霸凌最常见的形态是"几个人围住一个"，而两两对称性分析在这种场景
+    # 必然失效（攻击者彼此看都是对等冲突）。这里用"跨帧打斗关系图"补上这一情形。
+    GROUP_BULLY_MIN_ATTACKERS: int = 2      # 同时卷入的人数下限（星型图的邻接度）
+    GROUP_BULLY_MAX_COHESION: float = 0.34  # 这些同伴之间的对峙边密度上限（星型图判据）
+    GROUP_BULLY_EDGE_FRAMES: int = 2        # 一对人近窗内打斗达到几帧才算连边
+    GROUP_BULLY_MIN_FRAMES: int = 3         # 连续确认帧数
     BULLY_EMA_ALPHA: float = 0.25          # 交互指标的滑动平均系数（抑制单帧抖动）
     BULLY_MIN_FRAMES: int = 3              # 判定生效所需的连续帧数
     # 嬉闹抑制：四项指标同时"对等且无退缩"时，判为嬉闹，不产生报警。
@@ -161,8 +201,30 @@ class Settings(BaseSettings):
 
     CROWD_MIN_PEOPLE: int = 4            # 同帧人数达到该值判定聚集
 
+    # ===== 视频文件检测的自适应采样 =====
+    # 固定间隔会整段跳过短促动作：实测 8 秒素材里的推搡只持续约 0.35 秒，
+    # 用 0.33 秒的固定步长恰好落在两点之间，打人动作完全消失（只剩围观与倒地）。
+    # 改为按画面运动自适应：静止稀疏、动作密集并保持一小段活跃期。
+    #
+    # 注意 VIDEO_SAMPLE_ACTIVE_SEC 与行为判定的"确认帧数"是联动的：
+    # 打架需要连续 4 帧命中（FIGHT_MIN_FRAMES），因此动作时段的采样间隔
+    # 必须让一段 0.3~0.4 秒的短促冲突至少采到 4 帧。0.07 秒即 5 帧，
+    # 留出余量；调大该值会重新引入短促动作漏报。
+    VIDEO_MOTION_THRESHOLD: float = 0.010   # 帧差运动量阈值（160x90 灰度归一化）
+    VIDEO_SAMPLE_ACTIVE_SEC: float = 0.07   # 有动作时的采样间隔
+    VIDEO_SAMPLE_IDLE_SEC: float = 0.5      # 静止时的采样间隔
+    VIDEO_ACTIVE_HOLD_SEC: float = 0.8      # 检测到动作后维持密集采样的时长
+
     EVENT_VOTE_WINDOW: int = 15          # 轨迹级投票窗口帧数
-    TRACK_TTL_FRAMES: int = 45           # 轨迹失活回收帧数
+    TRACK_TTL_FRAMES: int = 45           # 轨迹失活回收帧数（兜底上限，正常按时间回收）
+    TRACK_TTL_SEC: float = 0.8           # 轨迹失活回收时长（秒）：帧率变化时存活时长不变
+    TRACK_CONFIRM_HITS: int = 2          # 轨迹确认门控：连续命中该帧数后才对外可见
+    TRACK_MAX_EXTRAP: int = 15           # 连续外推上限：超过则冻结预测框，防止甩出画面
+
+    # ===== 人数统计（中位数滤波 + 不对称迟滞）=====
+    PEOPLE_WINDOW: int = 5               # 中位数滤波窗口帧数
+    PEOPLE_UP_HOLD: int = 3              # 人数上调需连续确认帧数
+    PEOPLE_DOWN_HOLD: int = 8            # 人数下调需连续确认帧数（遮挡不应立刻减人）
 
     # ===== 语音识别（Provider 可插拔：云端为主，本地兜底）=====
     SPEECH_ENABLED: bool = True
@@ -271,6 +333,11 @@ class Settings(BaseSettings):
         return CLIP_DIR
 
     @property
+    def FACE_DIR(self) -> Path:
+        """人脸注册照与头像目录（本机存储，不外传）。"""
+        return DATA_DIR / self.FACE_PHOTO_DIRNAME
+
+    @property
     def MODELS_DIR(self) -> Path:
         return MODELS_DIR
 
@@ -279,7 +346,7 @@ class Settings(BaseSettings):
         return MODELS_DIR / self.VOSK_MODEL_NAME
 
     def ensure_dirs(self) -> None:
-        for d in (DATA_DIR, UPLOAD_DIR, EVIDENCE_DIR, CLIP_DIR, MODELS_DIR):
+        for d in (DATA_DIR, UPLOAD_DIR, EVIDENCE_DIR, CLIP_DIR, MODELS_DIR, self.FACE_DIR):
             d.mkdir(parents=True, exist_ok=True)
 
 
