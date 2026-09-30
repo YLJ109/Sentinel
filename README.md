@@ -44,8 +44,15 @@
 <td width="50%"><img src="docs/images/sentinel-history.png" alt="历史取证" /><br/><div align="center"><b>历史取证</b> · 检测事件 / 语音对话 / 视频检测 三栏检索与导出</div></td>
 </tr>
 <tr>
+<td width="50%"><img src="docs/images/sentinel-users.png" alt="用户与权限" /><br/><div align="center"><b>用户与权限</b> · 系统账号可写，学生 / 教师 / 管理人员花名册只读可查</div></td>
 <td width="50%"><img src="docs/images/sentinel-settings.png" alt="系统设置" /><br/><div align="center"><b>系统设置</b> · 检测能力开关、推理设备、44 项可调参数（改完立即生效）与点位管理</div></td>
-<td width="50%"><img src="docs/images/sentinel-wall.png" alt="点位态势墙" /><br/><div align="center"><b>点位态势墙</b> · 按点位汇总今日事件、待处置报警与在线状态</div></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/sentinel-cameras.png" alt="点位管理" /><br/><div align="center"><b>点位管理</b> · 摄像头增删改查、区域与隐私遮蔽设置</div></td>
+<td width="50%"><img src="docs/images/sentinel-login.png" alt="登录页" /><br/><div align="center"><b>登录页</b> · 中英双语标题与能力概览，带登录失败锁定</div></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/images/sentinel-wall.png" alt="点位态势墙" /><br/><div align="center"><b>点位态势墙</b> · 按点位汇总今日事件、待处置报警与在线状态（大屏视图，故整行展示）</div></td>
 </tr>
 </table>
 
