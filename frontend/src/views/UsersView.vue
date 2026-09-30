@@ -1,6 +1,28 @@
 <template>
   <div class="page">
-    <div class="panel corner fade-up">
+    <!-- 标签页：系统账号（可写）/ 三类人员档案（只读查看） -->
+    <div class="panel fade-up uv-tabs">
+      <button type="button" class="uv-tab" :class="{ on: tab === 'accounts' }" @click="tab = 'accounts'">
+        <Icon name="lock" /><span>系统账号</span><b>{{ users.length }}</b>
+      </button>
+      <button v-for="t in PERSON_TABS" :key="t.key" type="button" class="uv-tab"
+              :class="{ on: tab === t.key }" @click="tab = t.key">
+        <Icon :name="t.icon" /><span>{{ t.label }}</span><b>{{ counts[t.key] ?? 0 }}</b>
+      </button>
+      <div class="spacer" />
+      <span class="dim tiny">
+        {{ tab === 'accounts' ? '登录账号与角色权限（可编辑）' : '人员档案只读查看；维护请前往「人员管理」' }}
+      </span>
+    </div>
+
+    <!-- 人员档案：只读视角，与「人员管理」页复用同一组件 -->
+    <div v-if="tab !== 'accounts'" class="panel fade-up d1">
+      <div class="panel-bd">
+        <PersonPanel :key="tab" :owner-type="tab" readonly />
+      </div>
+    </div>
+
+    <div v-else class="panel corner fade-up">
       <div class="panel-hd">
         <span class="panel-title">用户与权限管理</span>
         <div class="spacer" />
@@ -143,6 +165,7 @@ import { useRouter } from 'vue-router'
 import Icon from '@/ui/Icon.vue'
 import Modal from '@/ui/Modal.vue'
 import BaseSelect from '@/ui/BaseSelect.vue'
+import PersonPanel from '@/components/PersonPanel.vue'
 import { toast } from '@/ui/toast'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api'
@@ -156,6 +179,23 @@ const createOpen = ref(false)
 const editOpen = ref(false)
 const pwdOpen = ref(false)
 const pwdTarget = ref(null)
+
+// 标签页：系统账号为可写视图，其余三类人员档案为只读查看视角。
+// 复用 PersonPanel 的 readonly 模式，避免在这里再写一套人员表格。
+const tab = ref('accounts')
+const PERSON_TABS = [
+  { key: 'student', label: '学生', icon: 'user' },
+  { key: 'teacher', label: '教师', icon: 'user' },
+  { key: 'staff', label: '管理人员', icon: 'shield' }
+]
+const counts = ref({})
+
+async function loadCounts() {
+  try {
+    const meta = await api.get('/api/persons/meta')
+    counts.value = meta.counts || {}
+  } catch { /* 静默 */ }
+}
 
 const roleZh = { admin: '系统管理员', operator: '值班操作员', viewer: '观察员' }
 const roleTag = { admin: 'tag--info', operator: 'tag--low', viewer: 'tag--mute' }
@@ -260,9 +300,29 @@ onMounted(() => {
     return
   }
   load()
+  loadCounts()
 })
 </script>
 
 <style scoped>
-/* .c-dot 已收敛到全局 style.css 的通用工具类 */
+/* 标签页：与系统设置 / 人员管理页保持同一套视觉语言 */
+.uv-tabs { display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin-bottom: 14px; }
+.uv-tabs .spacer { flex: 1; }
+.uv-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 15px;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  background: none; color: var(--tx-2);
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  transition: border-color 0.16s, background 0.16s, color 0.16s;
+}
+.uv-tab > svg { width: 14px; height: 14px; }
+.uv-tab > b { font-family: var(--font-mono); font-size: 11.5px; color: var(--tx-3); }
+.uv-tab:hover { border-color: var(--line-3); background: var(--bg-raise); }
+.uv-tab.on {
+  color: #eafaff; border-color: rgba(47, 214, 240, 0.7);
+  background: linear-gradient(135deg, rgba(47, 214, 240, 0.22), rgba(59, 130, 246, 0.1));
+  box-shadow: 0 0 14px rgba(47, 214, 240, 0.2);
+}
+.uv-tab.on > b { color: #bfeaff; }
 </style>

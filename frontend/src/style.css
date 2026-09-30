@@ -209,12 +209,14 @@ input.date-input { width: 148px; }
   position: relative;
   display: flex;
   align-items: center;
-  height: 80px;
+  /* 加高到 92px：平行四边形按钮内边距增大后需要更多纵向空间，
+     同时给两侧装饰的发光留出呼吸余量（原来 80px 会显得很挤） */
+  height: 92px;
   padding: 0 20px;
 }
 
-/* 标题 + 两侧菱形导航作为一个整体绝对居中：标题永远落在屏幕正中，
-   不受右侧用户区宽度影响，也不会被任何元素压住（纯展示层不拦截点击的只有装饰）。 */
+/* 标题 + 两侧平行四边形导航作为一个整体绝对居中：标题永远落在屏幕正中，
+   不受任何元素宽度影响（纯展示层不拦截点击的只有装饰）。 */
 .tb-core {
   position: absolute;
   left: 50%;
@@ -222,55 +224,111 @@ input.date-input { width: 148px; }
   transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 22px;
 }
 
-/* ---------- 菱形导航项 ---------- */
-.dnav-group { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+/* ---------- 平行四边形导航项 ----------
+   设计要点：
+   1. 按钮本体是平行四边形（skewX），图标与文字放在内层 .dnav-face 里做**反向 skew**
+      转正 —— 否则文字会跟着一起斜，中文斜体非常难读。
+   2. 左右两组**镜像对称**：左翼顶边向左倾、右翼顶边向右倾，两组的顶边都朝屏幕外侧
+      翻开，形成外扩式的对称构图（"括号"形，把中央标题托在中间）。
+   3. 质感分三层：外投影（把按钮从底色里"抬起来"）+ 上缘 1px 内高光（模拟受光面）
+      + 底部内阴影（压出厚度）。仅靠描边画不出这种立体感。
+   4. 倾斜量用 CSS 变量 --skew 驱动，紧凑模式下改一个变量即可。 */
+.dnav-group { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.dnav-group[data-side='left'] { --skew: 14deg; }
+.dnav-group[data-side='right'] { --skew: -14deg; }
 
 .dnav {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;              /* 需大于菱形的视觉外溢量（约 7px），否则会压住下方文字 */
-  width: auto;
-  min-width: 50px;
+  position: relative;
+  display: block;
   padding: 0;
   border: none;
   background: none;
   font-family: inherit;
   color: var(--tx-2);
   cursor: pointer;
-  transition: color 0.18s;
+  transition: color 0.2s;
 }
-/* 正菱形：旋转 45° 的方形 */
-.dnav-dia {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  transform: rotate(45deg);
-  border: 1px solid var(--line-2);
-  border-radius: 5px;
-  background: linear-gradient(135deg, rgba(47, 214, 240, 0.07), rgba(59, 130, 246, 0.03));
-  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+
+.dnav-face {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 17px;
+  border: 1px solid rgba(122, 162, 220, 0.3);
+  border-radius: 2px;
+  transform: skewX(var(--skew));
+  background:
+    linear-gradient(180deg,
+      rgba(47, 214, 240, 0.12) 0%,
+      rgba(59, 130, 246, 0.04) 52%,
+      rgba(6, 10, 18, 0.24) 100%),
+    rgba(13, 21, 35, 0.62);
+  box-shadow:
+    inset 0 1px 0 rgba(184, 236, 255, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    0 2px 9px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s, transform 0.2s;
 }
-/* 图标反向旋转回正，避免跟着菱形一起斜着 */
-.dnav-dia > svg { width: 16px; height: 16px; transform: rotate(-45deg); }
-.dnav-label { font-size: 12.5px; letter-spacing: 0.02em; white-space: nowrap; }
+
+/* 内容反向倾斜回正，图标与文字始终水平 */
+.dnav-face > * { transform: skewX(calc(var(--skew) * -1)); }
+.dnav-face > svg { width: 17px; height: 17px; flex-shrink: 0; opacity: 0.92; }
+.dnav-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
 
 .dnav:hover { color: var(--tx-1); }
-.dnav:hover .dnav-dia {
-  border-color: rgba(47, 214, 240, 0.5);
-  box-shadow: 0 0 12px rgba(47, 214, 240, 0.22);
+.dnav:hover .dnav-face {
+  border-color: rgba(47, 214, 240, 0.58);
+  background:
+    linear-gradient(180deg,
+      rgba(47, 214, 240, 0.22) 0%,
+      rgba(59, 130, 246, 0.08) 52%,
+      rgba(6, 10, 18, 0.2) 100%),
+    rgba(17, 28, 46, 0.72);
+  box-shadow:
+    inset 0 1px 0 rgba(198, 242, 255, 0.24),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 0 16px rgba(47, 214, 240, 0.26),
+    0 3px 12px rgba(0, 0, 0, 0.36);
+  transform: skewX(var(--skew)) translateY(-1px);
 }
-.dnav.on { color: #d9f7ff; }
-.dnav.on .dnav-dia {
-  border-color: rgba(47, 214, 240, 0.85);
-  background: linear-gradient(135deg, rgba(47, 214, 240, 0.3), rgba(59, 130, 246, 0.14));
-  box-shadow: 0 0 16px rgba(47, 214, 240, 0.45);
+
+.dnav.on { color: #f2fdff; }
+.dnav.on .dnav-face {
+  border-color: rgba(47, 214, 240, 0.9);
+  background:
+    linear-gradient(180deg,
+      rgba(47, 214, 240, 0.42) 0%,
+      rgba(59, 130, 246, 0.2) 58%,
+      rgba(10, 22, 40, 0.86) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(220, 250, 255, 0.45),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    0 0 22px rgba(47, 214, 240, 0.5),
+    0 3px 12px rgba(0, 0, 0, 0.36);
 }
-.dnav.on .dnav-label { font-weight: 600; }
+/* 选中态在斜边贴一条发光窄条 + 底缘一道能量线，作为"当前位置"的强指示 */
+.dnav.on .dnav-face::before {
+  content: '';
+  position: absolute; top: 2px; bottom: 2px; left: -1px; width: 3px;
+  background: linear-gradient(180deg, #b9f4ff, #2fd6f0 45%, rgba(59, 130, 246, 0.35));
+  box-shadow: 0 0 10px rgba(47, 214, 240, 0.9);
+}
+.dnav.on .dnav-face::after {
+  content: '';
+  position: absolute; left: 14%; right: 14%; bottom: -1px; height: 2px;
+  background: linear-gradient(90deg, transparent, #9fefff, transparent);
+}
+.dnav.on .dnav-label { font-weight: 700; }
+.dnav.on .dnav-face > svg { opacity: 1; filter: drop-shadow(0 0 6px rgba(47, 214, 240, 0.7)); }
 
 /* ---------- 标题 ---------- */
 .tb-title { display: flex; flex-direction: column; align-items: center; gap: 5px; }
@@ -298,33 +356,93 @@ input.date-input { width: 148px; }
   white-space: nowrap;
 }
 
-/* 标题两侧装饰：渐隐横线 + 光点 + 呼吸菱形 */
-.orn { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.orn-line {
-  display: block; width: 78px; height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(47, 214, 240, 0.7));
+/* 标题两侧装饰：三层发光条 + 光点 + 三级菱形（由外向内逐级收细、逐级提亮），
+   形成把视线推向中央标题的节奏。
+   左右两侧共用同一份 DOM 结构，右侧用 row-reverse 镜像 —— 手写两份反向结构
+   在后续增删元素时极易走样。 */
+.orn {
+  /* 三层条的长度以此为准，改这一个值即可整体缩放（响应式断点也用它） */
+  --orn-w: 104px;
+  display: flex; align-items: center; gap: 7px; flex-shrink: 0;
 }
-.orn--r .orn-line { background: linear-gradient(270deg, transparent, rgba(47, 214, 240, 0.7)); }
-.orn-dot { width: 3px; height: 3px; border-radius: 50%; background: rgba(47, 214, 240, 0.5); }
-.orn-dia {
-  width: 7px; height: 7px;
-  background: var(--acc);
-  transform: rotate(45deg);
-  box-shadow: 0 0 10px var(--acc);
-  animation: breathe 2.4s ease-in-out infinite;
-}
+.orn--r { flex-direction: row-reverse; }
 
-/* ---------- 右区：用户模块（独立贴右，不参与中间居中计算） ---------- */
-.tb-right {
-  position: absolute;
-  right: 20px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* 三层叠放的发光条：外长内短、外暗内亮。
+   内缘对齐（左翼右对齐 / 右翼左对齐）让三条线在靠标题一侧收成一条齐边，
+   外侧则呈阶梯状张开 —— 比"三条等长线叠在一起"更有纵深。
+   右翼直接整体做 scaleX(-1)，一次翻转同时镜像了对齐方向与渐变方向，
+   不必把三条渐变再各写一遍反向版本。 */
+.orn-bars {
+  display: flex; flex-direction: column; gap: 3px;
+  align-items: flex-end;
   flex-shrink: 0;
 }
+.orn--r .orn-bars { transform: scaleX(-1); }
+
+.orn-bar {
+  position: relative;
+  display: block; height: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+}
+.orn-bar--1 {
+  width: var(--orn-w);
+  background: linear-gradient(90deg, rgba(47, 214, 240, 0) 0%, rgba(47, 214, 240, 0.34) 100%);
+}
+.orn-bar--2 {
+  width: calc(var(--orn-w) * 0.74);
+  background: linear-gradient(90deg, rgba(47, 214, 240, 0) 0%, rgba(47, 214, 240, 0.62) 100%);
+}
+.orn-bar--3 {
+  width: calc(var(--orn-w) * 0.48);
+  background: linear-gradient(90deg, rgba(47, 214, 240, 0) 0%, rgba(120, 233, 255, 0.98) 100%);
+  box-shadow: 0 0 8px rgba(47, 214, 240, 0.7);
+}
+
+/* 高光沿着三条线依次扫过：层级越靠内越晚出发，形成"跑动"的层次感 */
+.orn-bar::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(215, 248, 255, 0.95), transparent);
+  background-size: 42% 100%;
+  background-repeat: no-repeat;
+  animation: orn-scan 3.4s ease-in-out infinite;
+}
+.orn-bar--2::after { animation-delay: 0.16s; }
+.orn-bar--3::after { animation-delay: 0.32s; }
+@keyframes orn-scan {
+  0%, 12% { background-position: -45% 0; }
+  88%, 100% { background-position: 145% 0; }
+}
+
+.orn-dot {
+  width: 3px; height: 3px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(47, 214, 240, 0.6);
+  box-shadow: 0 0 7px rgba(47, 214, 240, 0.65);
+}
+.orn-dia {
+  flex-shrink: 0;
+  width: 10px; height: 10px;
+  transform: rotate(45deg);
+  background: linear-gradient(135deg, #cdf5ff, rgba(47, 214, 240, 0.55));
+  box-shadow: 0 0 13px rgba(47, 214, 240, 0.75);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+.orn-dia--md {
+  width: 7px; height: 7px;
+  background: linear-gradient(135deg, rgba(160, 232, 255, 0.9), rgba(47, 214, 240, 0.4));
+  box-shadow: 0 0 9px rgba(47, 214, 240, 0.5);
+  animation-delay: 0.35s;
+}
+.orn-dia--sm {
+  width: 5px; height: 5px;
+  background: rgba(47, 214, 240, 0.42);
+  box-shadow: none;
+  animation-delay: 0.7s;
+}
+
+/* 顶栏右区已移除：账号信息卡下移到状态栏（见 components/AppShell.vue 的 #account 插槽），
+   顶栏只保留「标题 + 两侧平行四边形导航」，居中构图不再被右侧模块挤压 */
 
 .status-chip {
   display: inline-flex; align-items: center; gap: 7px;
@@ -565,6 +683,9 @@ button.sb-cap:hover { background: rgba(122, 162, 220, 0.1); border-color: var(--
   display: flex; flex-direction: column;
   padding: 12px 14px 10px;
 }
+/* 作为 Tab 内容嵌入到另一个 .page 里时，去掉自身的边距与宽度限制，
+   否则会出现双层内边距、内容明显右移 */
+.page.is-embedded { padding: 0; max-width: none; }
 
 /* ============================================================================
    面板
@@ -1013,6 +1134,23 @@ button.sb-cap:hover { background: rgba(122, 162, 220, 0.1); border-color: var(--
   font-family: var(--font-mono); font-size: 11px; color: rgba(47, 214, 240, 0.8);
   letter-spacing: 0.1em;
 }
+/* 人数徽标：数字用等宽字体固定宽度，人数变化时不会左右跳动 */
+.stage-video .pcount {
+  position: absolute; top: 10px; right: 44px;
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 4px 12px 5px; border-radius: 999px;
+  background: rgba(8, 14, 25, 0.72);
+  border: 1px solid var(--line-2);
+  backdrop-filter: blur(6px);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.stage-video .pcount b {
+  font-family: var(--font-mono); font-size: 19px; line-height: 1;
+  min-width: 1.1em; text-align: center; color: var(--tx-2);
+}
+.stage-video .pcount span { font-size: 11px; color: var(--tx-3); letter-spacing: 0.08em; }
+.stage-video .pcount.live { border-color: rgba(47, 214, 240, 0.45); box-shadow: 0 0 18px rgba(47, 214, 240, 0.12); }
+.stage-video .pcount.live b { color: var(--acc); }
 .stage-video .off {
   position: absolute; inset: 0;
   display: grid; place-items: center; gap: 10px;
@@ -1061,22 +1199,80 @@ button.sb-cap:hover { background: rgba(122, 162, 220, 0.1); border-color: var(--
   border: 1px solid var(--line);
   animation: rise 0.28s ease-out;
 }
-.bubble.hit { border-color: rgba(255, 77, 109, 0.5); background: rgba(255, 77, 109, 0.08); }
-.bubble .txt { font-size: 13px; }
+/* 语音转写的三档着色：气泡描边 + 命中词内联高亮，颜色与报警/警告/关注一一对应 */
+/* `.hit` 是报警详情弹窗里的旧类名，语义等同于 alarm 档，保留兼容 */
+.bubble.hit, .bubble.lv-alarm { border-color: rgba(255, 77, 109, 0.5); background: rgba(255, 77, 109, 0.08); }
+.bubble.lv-warn { border-color: rgba(255, 176, 32, 0.45); background: rgba(255, 176, 32, 0.07); }
+.bubble.lv-highlight { border-color: rgba(155, 123, 255, 0.4); background: rgba(155, 123, 255, 0.07); }
+.bubble .txt { font-size: 13px; line-height: 1.7; }
+.bubble .mark { border-radius: 3px; padding: 0 2px; font-weight: 600; }
+.bubble .mark--alarm { color: #ffd7de; background: rgba(255, 77, 109, 0.34); box-shadow: inset 0 -2px 0 var(--danger); }
+.bubble .mark--warn { color: #ffe9c4; background: rgba(255, 176, 32, 0.3); box-shadow: inset 0 -2px 0 var(--warn); }
+.bubble .mark--highlight { color: #ded3ff; background: rgba(155, 123, 255, 0.26); box-shadow: inset 0 -2px 0 var(--violet); }
 .bubble .meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--tx-3); }
-.bubble .kw { color: #ff8fa3; font-weight: 600; }
+.bubble .kw { font-weight: 600; }
+.bubble .kw--alarm { color: #ff8fa3; }
+.bubble .kw--warn { color: var(--warn); }
+.bubble .kw--highlight { color: var(--violet); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 
-.feed { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; }
-.feed-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 4px;
-  border-bottom: 1px dashed var(--line);
-  font-size: 13px;
+.feed { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+
+/* 实时事件卡片：头像 + 身份 + 情绪 + 行为。
+   相比原来的一行文字，卡片把"谁、哪个班、什么情绪、什么行为"四件事
+   在一眼内交代清楚 —— 值班老师据此决定要不要立刻过去。 */
+.ecard {
+  display: flex; gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-2);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  background: var(--bg-raise);
   animation: rise 0.28s ease-out;
 }
-.feed-row:last-child { border-bottom: none; }
-.feed-row .t { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--tx-3); }
+.ecard--high { border-left-color: var(--danger); background: linear-gradient(90deg, var(--danger-soft), transparent 70%), var(--bg-raise); }
+.ecard--medium { border-left-color: var(--warn); background: linear-gradient(90deg, var(--warn-soft), transparent 70%), var(--bg-raise); }
+.ecard--low { border-left-color: var(--tx-3); }
+
+.ecard-ava {
+  width: 40px; height: 40px; flex-shrink: 0;
+  border-radius: 9px; overflow: hidden;
+  border: 1px solid var(--line-2); background: var(--bg-inset);
+  display: grid; place-items: center; color: var(--tx-3);
+}
+.ecard-ava img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ecard-ava svg { width: 18px; height: 18px; }
+
+.ecard-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ecard-hd { display: flex; align-items: center; gap: 8px; }
+.ecard-hd .spacer { flex: 1; }
+.ecard-name { font-size: 13.5px; font-weight: 700; color: var(--tx-1); }
+.ecard-unknown { font-size: 13px; color: var(--tx-3); }
+.ecard-meta {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  font-size: 11.5px; color: var(--tx-2);
+}
+.ecard-foot { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.ecard-foot .spacer { flex: 1; }
+
+/* 情绪徽章：负面情绪用暖色描边以示区分；悬浮说明"仅供参考，非心理诊断" */
+.emo-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px 2px; border-radius: 999px;
+  border: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.03);
+  font-size: 11.5px; color: var(--tx-2); cursor: help;
+}
+.emo-chip > i { font-style: normal; font-family: var(--font-mono); font-size: 10.5px; color: var(--tx-3); }
+.emo-chip.neg { border-color: rgba(255, 176, 32, 0.45); background: var(--warn-soft); color: #ffdca8; }
+.emo-chip.neg > i { color: #ffcf8a; }
+
+/* 检测框标签内的情绪小徽章 */
+.bbox .lb-emo {
+  font-style: normal; font-weight: 600; margin-left: 5px;
+  padding: 0 5px 1px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.28);
+}
+.bbox .lb-name { font-weight: 800; }
 
 /* ============================================================================
    键值列表
@@ -1302,22 +1498,32 @@ button.sb-cap:hover { background: rgba(122, 162, 220, 0.1); border-color: var(--
 }
 
 /* ----------------------------------------------------------------------------
-   顶部栏响应式：按「装饰横线收窄 → 装饰隐藏 → 菱形导航收为汉堡入口」逐级让位。
-   标题与两侧菱形始终作为整体居中，宽度变化不影响居中关系。
+   顶部栏响应式：按「装饰横线收窄 → 装饰整体隐藏 → 导航只留图标 → 收为汉堡入口」
+   逐级让位。标题与两侧导航始终作为整体居中，宽度变化不影响居中关系。
+   按钮放大后（13.5px 字 + 11/17 内边距）单侧约占 700px，加上两侧装饰与标题，
+   满配约需 1920px 以上，因此各级断点比按钮较小时更早触发。
    -------------------------------------------------------------------------- */
-@media (max-width: 1720px) {
-  .orn-line { width: 44px; }
+@media (max-width: 2020px) {
+  .orn { --orn-w: 62px; }
 }
-@media (max-width: 1560px) {
+@media (max-width: 1780px) {
   .orn { display: none; }
 }
-@media (max-width: 1120px) {
+@media (max-width: 1620px) {
+  .dnav-label { display: none; }
+  /* 只留图标时收窄内边距与间距；平行四边形形状与图标反向倾斜都保留，
+     这样紧凑模式仍是同一套视觉语言，不会突然变成圆角方块 */
+  .dnav-face { padding: 11px 13px; gap: 0; }
+  .dnav-group { gap: 8px; }
+}
+@media (max-width: 1240px) {
   .dnav-group { display: none; }
   .hamburger { display: grid; }
 }
 @media (max-width: 720px) {
   .g-2, .g-3 { grid-template-columns: 1fr; }
-  .tb-row1 { height: 66px; padding: 0 12px; }
+  /* 手机上导航已收进汉堡菜单，顶栏只剩标题，高度收回 76px */
+  .tb-row1 { height: 76px; padding: 0 12px; }
   .tb-title-en { display: none; }
   .tb-title-cn { letter-spacing: 0.06em; }
 }

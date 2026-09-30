@@ -195,7 +195,7 @@
               <div class="txt">{{ c.text }}</div>
               <div class="meta">
                 <span class="mono">{{ (c.start_time || 0).toFixed(1) }}s</span>
-                <span v-if="c.hit_keywords" class="kw">命中：{{ c.hit_keywords }}</span>
+                <span v-if="c.hit_keywords" class="kw kw--alarm">命中：{{ c.hit_keywords }}</span>
               </div>
             </div>
           </div>

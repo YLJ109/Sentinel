@@ -9,7 +9,7 @@
   >
     <input ref="input" type="file" :accept="accept" hidden @change="onPick" />
     <div class="drop-ico"><Icon name="upload" /></div>
-    <div class="t1">{{ picked ? picked.name : '拖拽视频到此处，或点击选择' }}</div>
+    <div class="t1">{{ picked ? picked.name : title }}</div>
     <div class="t2">{{ picked ? prettySize : hint }}</div>
   </div>
 </template>
@@ -22,6 +22,8 @@ import { toast } from './toast'
 const props = defineProps({
   accept: { type: String, default: '.mp4,.avi,.mov,.mkv,.webm' },
   hint: { type: String, default: '支持 mp4 / avi / mov / mkv / webm' },
+  // 提示文案可覆盖：人脸注册等图片场景沿用同一组件，避免再写一个几乎相同的拖拽框
+  title: { type: String, default: '拖拽视频到此处，或点击选择' },
   maxMB: { type: Number, default: 512 }
 })
 const emit = defineEmits(['file'])

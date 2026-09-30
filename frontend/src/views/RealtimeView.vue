@@ -13,34 +13,35 @@
     <div class="grid g-main grid-fill">
       <!-- 视觉检测 -->
       <div class="panel corner fade-up panel-fill">
+        <!-- 点位选择与启停按钮并进标题栏：原先它们单独占 .panel-bd 里的第一行，
+             视觉上等于"标题栏 + 控制行"两个盒子，白白吃掉舞台的高度。
+             并进来后整个面板只剩一个头部盒子，舞台也更高。
+             注意 BaseSelect 要显式 flex-shrink: 0 —— 它是 div 不是 .btn，
+             不锁住会在空间不足时被压扁，而中间的 .panel-sub 会先省略。 -->
         <div class="panel-hd">
           <span class="panel-title">视觉行为检测</span>
+          <BaseSelect
+            v-model="cameraId"
+            :options="camOptions"
+            placeholder="未关联点位"
+            icon="camera"
+            clearable
+            style="width: 200px; flex-shrink: 0"
+          />
           <div class="spacer" />
           <span class="panel-sub mono">{{ inferMs ? `${inferMs.toFixed(1)} ms` : '— ms' }} · {{ people }} 人 · 人脸 {{ faces.length }}<span v-if="skipped"> · 跳过推理（{{ skipReasonText }}）</span> · 运动 {{ motionText }}</span>
           <span class="status-chip" :class="{ warn: !running || wsState !== 'open' }">
             <span class="dot" />{{ chipText }}
           </span>
           <button v-if="running && wsState !== 'open'" class="btn btn--xs" :disabled="wsState === 'connecting'" @click="connectDetect">
-            <Icon name="refresh" /> {{ wsState === 'connecting' ? '连接中…' : '重连检测通道' }}
+            <Icon name="refresh" /> {{ wsState === 'connecting' ? '连接中…' : '重连' }}
           </button>
+          <button v-if="!running" class="btn btn--sm btn--primary" @click="start">
+            <Icon name="video" /> 开启摄像头
+          </button>
+          <button v-else class="btn btn--sm btn--danger" @click="stopAll"><Icon name="close" /> 停止检测</button>
         </div>
         <div class="panel-bd">
-          <div class="row" style="margin-bottom: 14px">
-            <BaseSelect
-              v-model="cameraId"
-              :options="camOptions"
-              placeholder="未关联点位"
-              icon="camera"
-              clearable
-              style="width: 220px"
-            />
-            <div class="spacer" />
-            <button v-if="!running" class="btn btn--primary" @click="start">
-              <Icon name="video" /> 开启摄像头
-            </button>
-            <button v-else class="btn btn--danger" @click="stopAll"><Icon name="close" /> 停止检测</button>
-          </div>
-
           <!-- 舞台随剩余高度自适应：宽高同时受限时按比例取最大可用尺寸 -->
           <div class="stage-wrap">
             <div
@@ -53,15 +54,30 @@
               <div v-if="running" class="scan" />
               <!-- 骨架叠加层：按视频固有像素尺寸绘制，CSS 100% 铺满，容器比例与视频一致故 1:1 映射 -->
               <canvas ref="canvasEl" class="skeleton" />
-              <!-- 人脸检测叠加层：细边单独标识 -->
+              <!-- 人脸检测叠加层：已识别时直接打姓名，未识别只标"人脸" -->
               <div v-for="(f, i) in faces" :key="`f${i}`" class="bbox face" :style="boxStyle(f.bbox)">
-                <span class="lb">{{ f.confidence ? `人脸 ${Math.round(f.confidence * 100)}%` : '人脸' }}</span>
+                <span class="lb">
+                  <template v-if="f.person">{{ f.person.name }}<template v-if="f.person.class_name"> · {{ f.person.class_name }}</template></template>
+                  <template v-else>人脸{{ f.confidence ? ` ${Math.round(f.confidence * 100)}%` : '' }}</template>
+                  <em v-if="f.emotion" class="lb-emo" :title="EMOTION_TIP">{{ f.emotion.icon }} {{ f.emotion.label }}</em>
+                </span>
               </div>
               <div v-for="b in renderBoxes" :key="b.key" class="bbox" :class="b.type" :style="boxStyle([b.x1, b.y1, b.x2, b.y2])">
-                <span class="lb">#{{ b.trackId }} {{ b.label }} {{ Math.round(b.conf * 100) }}%</span>
+                <span class="lb">
+                  <template v-if="b.person">
+                    <b class="lb-name">{{ b.person.name }}</b><template v-if="b.person.class_name"> · {{ b.person.class_name }}</template>
+                  </template>
+                  <template v-else>#{{ b.trackId }}</template>
+                  {{ b.label }} {{ Math.round(b.conf * 100) }}%
+                  <em v-if="b.emotion" class="lb-emo" :title="EMOTION_TIP">{{ b.emotion.icon }} {{ b.emotion.label }}</em>
+                </span>
               </div>
               <span class="corner c-tl" /><span class="corner c-tr" /><span class="corner c-bl" /><span class="corner c-br" />
               <div v-if="running" class="hud">REC · {{ fps }} FPS · {{ frames }} FRAMES</div>
+              <!-- 人数徽标：与后端迟滞平滑后的人数一致，投屏时一眼可读 -->
+              <div v-if="running" class="pcount" :class="{ live: people > 0 }">
+                <b>{{ people }}</b><span>人在场</span>
+              </div>
               <div v-if="!running" class="off">
                 <div>
                   <Icon name="video" />
@@ -117,15 +133,20 @@
               <div class="t">开启语音监听后显示转写内容</div>
             </div>
             <div v-else class="stream">
-              <div v-if="partialText" class="bubble bubble--live">
-                <div class="txt">{{ partialText }}</div>
-                <div class="meta"><span class="mono">实时转写中…</span></div>
+              <div v-if="partialText" class="bubble bubble--live" :class="lvClass(partialHits)">
+                <div class="txt"><span v-for="(s, k) in markSegments(partialText, partialHits)" :key="k" :class="s.lv ? 'mark mark--' + s.lv : ''">{{ s.t }}</span></div>
+                <div class="meta">
+                  <span class="mono">实时转写中…</span>
+                  <span v-if="partialHits.length" class="kw" :class="'kw--' + topLevel(partialHits)">{{ levelLabel(topLevel(partialHits)) }}</span>
+                </div>
               </div>
-              <div v-for="(m, i) in chats" :key="i" class="bubble" :class="{ hit: m.hits.length }">
-                <div class="txt">{{ m.text }}</div>
+              <div v-for="(m, i) in chats" :key="i" class="bubble" :class="lvClass(m.hits)">
+                <div class="txt"><span v-for="(s, k) in markSegments(m.text, m.hits)" :key="k" :class="s.lv ? 'mark mark--' + s.lv : ''">{{ s.t }}</span></div>
                 <div class="meta">
                   <span class="mono">{{ clock(m.t) }}</span>
-                  <span v-if="m.hits.length" class="kw">命中：{{ m.hits.join('、') }}</span>
+                  <span v-if="m.hits.length" class="kw" :class="'kw--' + topLevel(m.hits)">
+                    {{ levelLabel(topLevel(m.hits)) }}：{{ hitText(m.hits) }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -144,11 +165,41 @@
               <div class="t">暂无异常事件</div>
             </div>
             <div v-else class="feed">
-              <div v-for="(e, i) in events" :key="i" class="feed-row">
-                <span class="tag" :class="`tag--${e.lv}`">{{ e.label }}</span>
-                <span class="mono tiny muted">{{ Math.round(e.confidence * 100) }}%</span>
-                <span v-if="e.track_ids && e.track_ids.length" class="tiny dim mono">#{{ e.track_ids.join(' #') }}</span>
-                <span class="t">{{ clock(e.t) }}</span>
+              <div v-for="(e, i) in events" :key="i" class="ecard" :class="`ecard--${e.lv}`">
+                <div class="ecard-ava">
+                  <img v-if="e.primary && e.primary.avatar_url" :src="e.primary.avatar_url" :alt="e.primary.name" loading="lazy" />
+                  <Icon v-else name="user" />
+                </div>
+                <div class="ecard-main">
+                  <div class="ecard-hd">
+                    <span class="tag" :class="`tag--${e.lv}`">{{ e.label }}</span>
+                    <b v-if="e.primary" class="ecard-name">{{ e.primary.name }}</b>
+                    <span v-else class="ecard-unknown">未识别人员</span>
+                    <div class="spacer" />
+                    <span class="mono tiny dim">{{ clock(e.t) }}</span>
+                  </div>
+                  <div class="ecard-meta">
+                    <template v-if="e.primary">
+                      <span>{{ e.primary.type_label }}</span>
+                      <span v-if="e.primary.gender">{{ e.primary.gender }}</span>
+                      <span>{{ e.primary.class_name || e.primary.department || '—' }}</span>
+                      <span class="mono">编号 {{ e.primary.no }}</span>
+                    </template>
+                    <span v-else class="dim">未授权或未建档，仅显示行为线索（不影响报警）</span>
+                  </div>
+                  <div class="ecard-foot">
+                    <span v-if="e.emotion" class="emo-chip" :class="{ neg: e.emotion.negative }" :title="EMOTION_TIP">
+                      {{ e.emotion.icon }} {{ e.emotion.label }}
+                      <i>{{ Math.round(e.emotion.confidence * 100) }}%</i>
+                    </span>
+                    <span class="mono tiny dim">置信 {{ Math.round(e.confidence * 100) }}%</span>
+                    <span v-if="e.track_ids && e.track_ids.length" class="tiny dim mono">#{{ e.track_ids.join(' #') }}</span>
+                    <div class="spacer" />
+                    <button class="btn btn--xs btn--ghost" @click="goAlarms()">
+                      <Icon name="bell" /> 处置
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -160,16 +211,25 @@
 
 <script setup>
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Icon from '@/ui/Icon.vue'
 import BaseSelect from '@/ui/BaseSelect.vue'
 import { toast } from '@/ui/toast'
 import { setCamera, setMic } from '@/stores/device'
 import api, { wsUrl, wsProtocols } from '@/api'
 
+const route = useRoute()
+const router = useRouter()
+
+/** 情绪说明：面部表情不等于真实情绪，必须让使用者知道这个边界 */
+const EMOTION_TIP = '基于面部表情的实时估计，仅供参考，非心理诊断；不写入学生档案'
+
+function goAlarms() {
+  if (route.path !== '/alarms') router.push('/alarms')
+}
+
 const cameras = ref([])
 const cameraId = ref('')
-const route = useRoute()
 const videoEl = ref(null)
 const canvasEl = ref(null)
 const running = ref(false)
@@ -195,6 +255,7 @@ const arNum = computed(() => {
 const chats = reactive([])
 const events = reactive([])
 const partialText = ref('')
+const partialHits = ref([])
 const alarm = ref(null)
 const fps = ref(0)
 const frames = ref(0)
@@ -218,6 +279,59 @@ let audioRetryTimer = null
 const camOptions = computed(() => cameras.value.map((c) => ({ value: c.id, label: `${c.name}（${c.location || '未设置位置'}）` })))
 const lvOf = { bullying: 'high', fight: 'high', argue: 'high', fall: 'medium', smoke: 'low', crowd: 'low' }
 const clock = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false })
+
+// ---------------------------------------------------------------- 关键词三档高亮
+// 词表扩到几千条后，满屏同色高亮等于没有分级。这里按后端的 level 分三档着色：
+//   alarm 红（触发报警）/ warn 橙（警告提示）/ highlight 紫（仅复核线索）
+const LV_RANK = { highlight: 0, warn: 1, alarm: 2 }
+const LV_NAME = { alarm: '报警', warn: '警告', highlight: '关注' }
+
+function topLevel(hits) {
+  let top = null
+  for (const h of hits || []) {
+    if (top === null || (LV_RANK[h.lv] ?? 0) > (LV_RANK[top] ?? 0)) top = h.lv
+  }
+  return top
+}
+const lvClass = (hits) => (topLevel(hits) ? `lv-${topLevel(hits)}` : '')
+const levelLabel = (lv) => LV_NAME[lv] || ''
+const hitText = (hits) => (hits || []).map((h) => (h.d ? `${h.w}(疑似)` : h.w)).join('、')
+
+/**
+ * 把转写文本切成「普通片段 / 命中片段」，供模板做局部高亮。
+ * 注意后端返回的是**归一化文本中的匹配串**（已去标点并转小写），
+ * 因此这里用不区分大小写的字面查找还原到原文位置；模糊命中的词在原文里
+ * 通常并不字面存在，此时不做局部高亮，只在下方命中行标注"疑似"。
+ */
+function markSegments(text, hits) {
+  const src = text || ''
+  if (!src || !hits?.length) return [{ t: src, lv: null }]
+  const low = src.toLowerCase()
+  const marks = []
+  for (const h of hits) {
+    const w = (h.w || '').toLowerCase()
+    if (!w) continue
+    for (let from = 0; ;) {
+      const i = low.indexOf(w, from)
+      if (i < 0) break
+      marks.push({ s: i, e: i + w.length, lv: h.lv })
+      from = i + w.length
+    }
+  }
+  if (!marks.length) return [{ t: src, lv: null }]
+  // 长词优先：短词与长词重叠时保留长词，避免把「打死你」切碎成「打死」+「你」
+  marks.sort((a, b) => a.s - b.s || b.e - a.e)
+  const out = []
+  let cur = 0
+  for (const m of marks) {
+    if (m.s < cur) continue
+    if (m.s > cur) out.push({ t: src.slice(cur, m.s), lv: null })
+    out.push({ t: src.slice(m.s, m.e), lv: m.lv })
+    cur = m.e
+  }
+  if (cur < src.length) out.push({ t: src.slice(cur), lv: null })
+  return out
+}
 
 // 跳过推理原因中文映射
 const SKIP_TEXT = { no_motion: '画面静止', rate_limited: '限频' }
@@ -295,7 +409,11 @@ const targets = computed(() => {
       label: beh ? beh.label : b.label,
       conf: beh ? beh.confidence : b.confidence,
       bbox: b.bbox,
-      kpts: b.kpts
+      kpts: b.kpts,
+      // 身份与情绪：由后端在"轨迹级确认"后才下发，未确认时为 null，
+      // 前端据此渲染"未识别人员"而不是猜测身份
+      person: b.person || null,
+      emotion: b.emotion || null
     }
   })
 })
@@ -360,6 +478,7 @@ function stepOverlay(now) {
       // 新目标：直接落位。px* 用实测值初始化，避免首帧算出一个巨大的假速度
       smoothMap.set(t.key, {
         trackId: t.trackId, type: t.type, label: t.label, conf: t.conf,
+        person: t.person, emotion: t.emotion,
         x1: t.bbox[0], y1: t.bbox[1], x2: t.bbox[2], y2: t.bbox[3],
         vx: 0, vy: 0,
         px1: t.bbox[0], py1: t.bbox[1], px2: t.bbox[2], py2: t.bbox[3],
@@ -424,6 +543,11 @@ function stepOverlay(now) {
     cur.type = t.type
     cur.label = t.label
     cur.conf = t.conf
+    // 身份只前进不后退：识别是间歇性执行的（每 N 次检测才跑一次），
+    // 若每次未命中就把姓名清空，标签会以识别周期为频率疯狂闪烁。
+    // 因此保留最近一次确认结果，只有后端明确给了新结果才更新。
+    if (t.person) cur.person = t.person
+    if (t.emotion) cur.emotion = t.emotion
     cur.seen = nowSec
   }
 
@@ -591,7 +715,19 @@ function connectDetect() {
     motion.value = d.motion ?? 0
     for (const h of behaviors.value) {
       if (['bullying', 'fight', 'argue', 'fall', 'smoke', 'crowd'].includes(h.event_type)) {
-        events.unshift({ ...h, lv: lvOf[h.event_type] || 'low', t: Date.now() })
+        // 把关联轨迹的身份与情绪一并带进事件卡片：
+        // 值班老师最需要的不是"#12 与 #15 发生推搡"，而是"张三（初二3班）正在被推搡"。
+        const byId = new Map((d.boxes || []).map((b) => [b.track_id, b]))
+        const persons = (h.track_ids || []).map((id) => byId.get(id)?.person).filter(Boolean)
+        const emotions = (h.track_ids || []).map((id) => byId.get(id)?.emotion).filter(Boolean)
+        events.unshift({
+          ...h,
+          persons,
+          primary: persons[0] || null,
+          emotion: emotions.find((e) => e.negative) || emotions[0] || null,
+          lv: lvOf[h.event_type] || 'low',
+          t: Date.now()
+        })
         if (events.length > 60) events.pop()
       }
     }
@@ -728,13 +864,18 @@ function connectAudioWs() {
     }
     if (d.type === 'partial') {
       partialText.value = d.text || ''
+      partialHits.value = d.hits || []
       return
     }
     if (d.type === 'final') {
       partialText.value = ''
+      partialHits.value = []
       if (d.text) {
-        chats.unshift({ text: d.text, hits: d.keywords || [], t: Date.now() })
+        chats.unshift({ text: d.text, hits: d.hits || [], level: d.level || null, t: Date.now() })
         if (chats.length > 100) chats.pop()
+        // 三档分级提示：alarm 才落到报警链路，warn 只做提示，highlight 仅高亮
+        if (d.level === 'alarm') toast.err(`语音报警：命中「${hitText(d.hits)}」`)
+        else if (d.level === 'warn') toast.warn(`语音警告：命中「${hitText(d.hits)}」`)
       }
       if (d.alarm) alarm.value = d.alarm
     }
@@ -771,6 +912,7 @@ function cleanupAudio() {
   if (audioCtx) { try { audioCtx.close() } catch { /* noop */ } audioCtx = null }
   if (wsAudio) { try { wsAudio.close() } catch { /* noop */ } wsAudio = null }
   partialText.value = ''
+  partialHits.value = []
 }
 
 function stopAudio() {

@@ -41,10 +41,16 @@ const NAV = [
   { path: '/realtime', label: '实时检测', icon: 'video', group: '监测' },
   { path: '/video', label: '视频检测', icon: 'film', group: '监测' },
   { path: '/wall', label: '点位态势墙', icon: 'monitor', group: '监测' },
+  // 关键词是检测的输入（词表决定语音侧能识别什么），因此归在「监测」组而非配置组
+  { path: '/keywords', label: '关键词管理', icon: 'mic', group: '监测' },
   { path: '/alarms', label: '报警处置', icon: 'bell', group: '处置' },
   { path: '/history', label: '历史取证', icon: 'folder', group: '处置' },
-  { path: '/cameras', label: '摄像头管理', icon: 'sliders', group: '配置' },
-  { path: '/users', label: '用户与权限', icon: 'user', group: '配置', adminOnly: true }
+  // 人员管理是人脸识别与事件流身份展示的数据源，与摄像头点位同属"基础数据"
+  { path: '/persons', label: '人员管理', icon: 'user', group: '配置' },
+  // 摄像头点位管理已并入系统设置页的「点位管理」标签，此处不再单列，
+  // 以保证左 5 右 5 的对称布局不被打破；/cameras 路由仍然保留，深链不会失效
+  { path: '/settings', label: '系统设置', icon: 'sliders', group: '配置' },
+  { path: '/users', label: '用户与权限', icon: 'lock', group: '配置', adminOnly: true }
 ]
 
 const roleZh = computed(() => ({ admin: '系统管理员', operator: '值班操作员', viewer: '观察员' }[auth.role] || auth.role))
@@ -204,9 +210,9 @@ onUnmounted(() => {
           <Icon name="layers" />
         </button>
 
-        <!-- 标题与两侧菱形导航作为一个整体居中 -->
+        <!-- 标题与两侧导航作为一个整体居中 -->
         <div class="tb-core">
-          <div class="dnav-group">
+          <div class="dnav-group" data-side="left">
             <button
               v-for="n in leftNav"
               :key="n.path"
@@ -216,11 +222,21 @@ onUnmounted(() => {
               :title="n.label"
               @click="go(n.path)"
             >
-              <span class="dnav-dia"><Icon :name="n.icon" /></span>
-              <span class="dnav-label">{{ n.label }}</span>
+              <span class="dnav-face">
+                <Icon :name="n.icon" />
+                <span class="dnav-label">{{ n.label }}</span>
+              </span>
             </button>
             <span class="orn orn--l" aria-hidden="true">
-              <i class="orn-line" /><i class="orn-dot" /><i class="orn-dia" />
+              <span class="orn-bars">
+                <i class="orn-bar orn-bar--1" />
+                <i class="orn-bar orn-bar--2" />
+                <i class="orn-bar orn-bar--3" />
+              </span>
+              <i class="orn-dot" />
+              <i class="orn-dia orn-dia--sm" />
+              <i class="orn-dia orn-dia--md" />
+              <i class="orn-dia" />
             </span>
           </div>
 
@@ -229,9 +245,19 @@ onUnmounted(() => {
             <span class="tb-title-sub">校园反霸凌智能检测系统</span>
           </div>
 
-          <div class="dnav-group">
+          <div class="dnav-group" data-side="right">
+            <!-- 右侧装饰与左侧共用同一份结构，靠 row-reverse 镜像，
+                 避免"两份手写反向结构"随着后续加装饰元素逐渐走样 -->
             <span class="orn orn--r" aria-hidden="true">
-              <i class="orn-dia" /><i class="orn-dot" /><i class="orn-line" />
+              <span class="orn-bars">
+                <i class="orn-bar orn-bar--1" />
+                <i class="orn-bar orn-bar--2" />
+                <i class="orn-bar orn-bar--3" />
+              </span>
+              <i class="orn-dot" />
+              <i class="orn-dia orn-dia--sm" />
+              <i class="orn-dia orn-dia--md" />
+              <i class="orn-dia" />
             </span>
             <button
               v-for="n in rightNav"
@@ -242,40 +268,16 @@ onUnmounted(() => {
               :title="n.label"
               @click="go(n.path)"
             >
-              <span class="dnav-dia"><Icon :name="n.icon" /></span>
-              <span class="dnav-label">{{ n.label }}</span>
+              <span class="dnav-face">
+                <Icon :name="n.icon" />
+                <span class="dnav-label">{{ n.label }}</span>
+              </span>
             </button>
           </div>
         </div>
 
-        <!-- 右侧：用户模块（时钟在底部状态栏） -->
-        <div class="tb-right">
-          <div ref="userDdEl" class="dd user-dd" :class="{ open: userOpen }">
-            <button type="button" class="dd-btn user-btn" @click="userOpen = !userOpen">
-              <span class="who-avatar">{{ initial }}</span>
-              <span class="u-name">{{ auth.user?.full_name || auth.user?.username || '未登录' }}</span>
-              <Icon name="chev-down" class="caret" />
-            </button>
-            <div v-if="userOpen" class="dd-menu">
-              <div class="dd-head">
-                <div class="n ellip">{{ auth.user?.full_name || auth.user?.username || '未登录' }}</div>
-                <div class="r">{{ roleZh }} · {{ auth.user?.username || '—' }}</div>
-              </div>
-              <div class="dd-opt" @click="openPwd">
-                <Icon name="lock" style="width: 15px; height: 15px" /> 修改密码
-              </div>
-              <div v-if="auth.role === 'admin'" class="dd-opt" @click="go('/users')">
-                <Icon name="user" style="width: 15px; height: 15px" /> 用户与权限
-              </div>
-              <div class="dd-opt" @click="logOpen = true">
-                <Icon name="alert" style="width: 15px; height: 15px" /> 运行日志
-              </div>
-              <div class="dd-opt" @click="logout">
-                <Icon name="logout" style="width: 15px; height: 15px" /> 退出登录
-              </div>
-            </div>
-          </div>
-        </div>
+        <!-- 右区留空：账号信息卡已下移到状态栏。
+             顶栏因此只剩「标题 + 两侧平行四边形导航」，居中构图不再被右侧挤压 -->
       </div>
     </header>
 
@@ -283,7 +285,37 @@ onUnmounted(() => {
       <router-view />
     </main>
 
-    <StatusBar :status="sysStatus" @open-logs="logOpen = true" @refresh="loadStatus" />
+    <StatusBar :status="sysStatus" @open-logs="logOpen = true">
+      <!-- 账号信息卡（原顶栏右侧用户模块）：头像 + 姓名 + 角色，点击展开菜单 -->
+      <template #account>
+        <div ref="userDdEl" class="dd" :class="{ open: userOpen }">
+          <button type="button" class="sb-account" :title="`${auth.user?.full_name || auth.user?.username || '未登录'} · ${roleZh}`"
+                  @click="userOpen = !userOpen">
+            <span class="sb-account-ava">{{ initial }}</span>
+            <span class="sb-account-name">{{ auth.user?.full_name || auth.user?.username || '未登录' }}</span>
+            <Icon name="chev-down" class="caret" />
+          </button>
+          <div v-if="userOpen" class="dd-menu sb-account-menu">
+            <div class="dd-head">
+              <div class="n ellip">{{ auth.user?.full_name || auth.user?.username || '未登录' }}</div>
+              <div class="r">{{ roleZh }} · {{ auth.user?.username || '—' }}</div>
+            </div>
+            <div class="dd-opt" @click="openPwd">
+              <Icon name="lock" style="width: 15px; height: 15px" /> 修改密码
+            </div>
+            <div v-if="auth.role === 'admin'" class="dd-opt" @click="go('/users')">
+              <Icon name="user" style="width: 15px; height: 15px" /> 用户与权限
+            </div>
+            <div class="dd-opt" @click="logOpen = true">
+              <Icon name="alert" style="width: 15px; height: 15px" /> 运行日志
+            </div>
+            <div class="dd-opt" @click="logout">
+              <Icon name="logout" style="width: 15px; height: 15px" /> 退出登录
+            </div>
+          </div>
+        </div>
+      </template>
+    </StatusBar>
 
     <!-- 小屏抽屉导航 -->
     <Drawer v-model="navOpen" title="导航菜单">
@@ -362,12 +394,45 @@ onUnmounted(() => {
 <style scoped>
 /* .ellip 已收敛到全局 style.css 的通用工具类 */
 
-/* 顶栏用户菜单 */
-.user-dd { position: relative; }
-.user-btn { width: auto; padding: 0 8px 0 6px; gap: 9px; }
-.user-btn .who-avatar { width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
-.user-btn .u-name { font-size: 13px; font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-dd .dd-menu { left: auto; right: 0; width: 216px; }
+/* ---------- 底部状态栏内的账号信息卡 ----------
+   尺寸刻意与同栏的 .sb-info / .sb-log 对齐（同样的内边距、圆角与字号），
+   否则它会显得比旁边的时间、设备、日志块"大一码"，视觉上不整齐。 */
+.sb-account {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 3px 9px 3px 4px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  color: var(--tx-2);
+  font-family: inherit; font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.sb-account:hover { border-color: var(--line-3); color: var(--tx-1); }
+.sb-account-ava {
+  width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
+  display: grid; place-items: center;
+  font-family: var(--font-display); font-weight: 700; font-size: 11px;
+  background: linear-gradient(135deg, rgba(47, 214, 240, 0.24), rgba(59, 130, 246, 0.16));
+  border: 1px solid rgba(47, 214, 240, 0.3);
+  color: #cdf3ff;
+}
+.sb-account-name {
+  font-weight: 600; max-width: 110px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sb-account .caret { width: 12px; height: 12px; color: var(--tx-3); transition: transform 0.18s; }
+.dd.open .sb-account .caret { transform: rotate(180deg); }
+
+/* 状态栏贴底，菜单必须向上展开（沿用历史上设备下拉的同一处理） */
+.sb-account-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+  left: auto;
+  right: 0;
+  width: 216px;
+  z-index: 120;
+}
 .dd-head { padding: 8px 11px 11px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
 .dd-head .n { font-size: 13.5px; font-weight: 600; }
 .dd-head .r { font-size: 11.5px; color: var(--tx-3); }
@@ -375,9 +440,8 @@ onUnmounted(() => {
 /* 抽屉内导航排版 */
 .m-nav { display: flex; flex-direction: column; }
 
-/* 窄屏时收起用户名，为顶栏两侧的菱形导航让出空间；
-   完整姓名仍可在下拉菜单与抽屉导航中看到，不存在信息缺失。 */
+/* 窄屏时收起姓名，只留头像与菜单入口；完整姓名仍可在菜单与抽屉中看到 */
 @media (max-width: 1280px) {
-  .user-btn .u-name { display: none; }
+  .sb-account-name { display: none; }
 }
 </style>
