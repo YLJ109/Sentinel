@@ -30,6 +30,7 @@ from app.services import notify
 from app.services.clips import clip_recorder
 from app.services.state_store import state_store
 from app.vision.engine import FrameResult
+from app.vision.privacy import is_masked
 
 log = logging.getLogger("services.alarm")
 
@@ -145,6 +146,11 @@ async def process_frame(
     triggered: dict[str, Any] | None = None
 
     for hit in result.behaviors:
+        # 隐私遮蔽：目标框中心落在遮蔽区内的，不产生事件、不落取证。
+        # 放在最前面拦截 —— 一旦落库或截图，隐私就已经泄露，后面再过滤没有意义。
+        if is_masked(hit.bbox, camera_id):
+            continue
+
         meta = behavior_meta(hit.event_type)
         is_bullying = bool(meta["is_bullying"])
 

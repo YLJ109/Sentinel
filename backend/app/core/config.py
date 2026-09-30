@@ -217,6 +217,14 @@ class Settings(BaseSettings):
     # 冷却/去重状态落库，保证多 worker 与重启后行为一致
     ALARM_STATE_TTL_SEC: int = 3600
 
+    # ===== 隐私保护 =====
+    # 隐私遮蔽区域：目标框中心落在区域内的，不产生检测事件、不落任何取证。
+    # 用于教室后墙、卫生间门口等不宜纳入监测的位置（数据最小化原则）。
+    # 格式为 JSON 数组，每项 {"camera": 点位 id 或 null 表示全部点位,
+    #                        "rect": [x1, y1, x2, y2]}，坐标为 0~1 归一化像素坐标。
+    # 示例：[{"camera": 3, "rect": [0.62, 0.0, 1.0, 0.55]}]
+    PRIVACY_ZONES: str = "[]"
+
     # ===== 取证 =====
     EVIDENCE_KEEP_DAYS: int = 90
     CLIP_PRE_SECONDS: int = 3            # 报警前预录时长
