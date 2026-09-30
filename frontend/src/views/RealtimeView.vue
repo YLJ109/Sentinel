@@ -157,6 +157,9 @@ const running = ref(false)
 const audioOn = ref(false)
 const boxes = ref([])
 const behaviors = ref([])
+// 每收到一批新检测结果自增：平滑层据此区分「新结果」与「同一结果的重复渲染」，
+// 只在真正拿到新数据时更新速度估计
+const detectSeq = ref(0)
 const faces = ref([])
 const people = ref(0)
 const inferMs = ref(0)
@@ -227,29 +230,47 @@ const SKELETON = [
 // （模型对"不可见"的关键点会给 (0,0) 但置信度仍有 0.3+，只按置信度过滤会让骨架飞到左上角）
 const validKpt = (k) => !!k && k[2] >= 0.3 && !(k[0] <= 0 && k[1] <= 0)
 
-/* ---------------- 检测框 / 骨架的平滑跟随 ----------------
- * 推理只有 4~12 fps，检测结果本身还有像素级抖动。若按结果直接摆放，框会一格一格跳。
- * 这里给每条轨迹维护一份"显示值"，在 60fps 的 rAF 里以指数缓动逼近最新检测结果：
- *   - 补出两次推理之间的连续运动 → 跟着人走，丝滑
- *   - 指数平滑天然滤掉单帧抖动   → 防抖
- *   - 偶发漏检时保留一小段时间再移除 → 框不会闪
- * 关键点用同一条时间常数一起缓动，骨架才不会一格一格跳。
- */
-const SMOOTH_TAU = 0.1   // 时间常数（秒）：越小跟得越紧，越大越平滑
-const SMOOTH_TTL = 0.6   // 目标消失后继续显示多久（秒），抑制漏检闪烁
+/* 送检周期：画面跑 30fps、送检跑 10fps（即"每 3 帧送 1 帧"）。
+ * 必须定义在平滑层之前：平滑层要拿它当作"速度外推的时长上限"，
+ * 而 const 存在暂时性死区，放在后面会在模块初始化时直接抛 ReferenceError。 */
+const SEND_INTERVAL_MS = 100
 
-const smoothMap = reactive(new Map())   // key -> {x1,y1,x2,y2,kpts,ok,type,label,conf,trackId,seen}
+/* ---------------- 检测框 / 骨架的平滑跟随（指数缓动 + 速度外推）----------------
+ * 送检只有 10fps，而画面是 30fps 视频 + 60fps 的 rAF 平滑层 —— 两次检测之间目标一直在动。
+ * 单纯"缓动追最新值"会让框始终落后真人约半个检测周期，快速走动时肉眼可见地拖尾。
+ *
+ * 这里在缓动之上叠加一层航位推算（dead reckoning）：
+ *   1) 每收到一批新结果，用相邻两次实测中心的位移差估计目标速度，并做指数平滑；
+ *   2) 每个渲染帧，把「目标位置」沿速度方向前推一段（封顶一个送检周期）。
+ * 于是：检测结果负责纠偏，速度外推负责补出帧间运动 —— 框与骨架连续跟随真人。
+ *
+ * 三层保护缺一不可：
+ *   - 指数缓动        → 滤掉单帧定位抖动（防抖）
+ *   - 外推时长封顶    → 漏检时不会按旧速度一路飞出去
+ *   - 关键点 ok[] 状态 → 失效点只标失效、坐标原地保留，恢复时直接落位（防"飞线"）
+ */
+const SMOOTH_TAU = 0.09     // 位置时间常数（秒）：越小越跟手，越大越平滑
+const SMOOTH_TTL = 0.6      // 目标消失后继续显示多久（秒），抑制漏检闪烁
+const VEL_ALPHA = 0.35      // 速度平滑系数：越小越稳、越大越跟手
+const EXTRAP_MAX_SEC = SEND_INTERVAL_MS / 1000   // 外推时长上限 = 一个送检周期
+
+// key -> {x1,y1,x2,y2, vx,vy, px1,py1,px2,py2, seq, detectAt, kpts, ok, type,label,conf,trackId,seen}
+//   px1..py2 = 上一次的实测框。算速度必须用实测值，不能用被缓动过的显示值，否则会低估速度
+//   detectAt = 最近一次收到结果的时刻（秒），当前外推时长由它推出
+const smoothMap = reactive(new Map())
 let overlayRaf = null
 let overlayLast = 0
 
 /** 本次推理的目标位置（也是标签/类型的来源） */
 const targets = computed(() => {
   const behs = behaviors.value || []
+  const seq = detectSeq.value
   return (boxes.value || []).map((b) => {
     const beh = behs.find((h) => Array.isArray(h.track_ids) && h.track_ids.includes(b.track_id))
     return {
       key: `t${b.track_id}`,
       trackId: b.track_id,
+      seq,
       type: beh ? beh.event_type : 'person',
       label: beh ? beh.label : b.label,
       conf: beh ? beh.confidence : b.confidence,
@@ -273,19 +294,43 @@ function stepOverlay(now) {
   for (const t of targets.value) {
     const cur = smoothMap.get(t.key)
     if (!cur) {
+      // 新目标：直接落位。px* 用实测值初始化，避免首帧算出一个巨大的假速度
       smoothMap.set(t.key, {
         trackId: t.trackId, type: t.type, label: t.label, conf: t.conf,
         x1: t.bbox[0], y1: t.bbox[1], x2: t.bbox[2], y2: t.bbox[3],
+        vx: 0, vy: 0,
+        px1: t.bbox[0], py1: t.bbox[1], px2: t.bbox[2], py2: t.bbox[3],
+        seq: t.seq, detectAt: nowSec,
         kpts: t.kpts ? t.kpts.map((k) => [k[0], k[1], k[2]]) : null,
         ok: t.kpts ? t.kpts.map((k) => validKpt(k)) : null,
         seen: nowSec
       })
       continue
     }
-    cur.x1 += (t.bbox[0] - cur.x1) * alpha
-    cur.y1 += (t.bbox[1] - cur.y1) * alpha
-    cur.x2 += (t.bbox[2] - cur.x2) * alpha
-    cur.y2 += (t.bbox[3] - cur.y2) * alpha
+
+    // ---- 拿到一批新检测结果：用相邻两次实测中心的位移估计速度并做指数平滑 ----
+    if (t.seq !== cur.seq) {
+      const dtDetect = Math.max(1e-3, nowSec - cur.detectAt)
+      const dcx = (t.bbox[0] + t.bbox[2]) / 2 - (cur.px1 + cur.px2) / 2
+      const dcy = (t.bbox[1] + t.bbox[3]) / 2 - (cur.py1 + cur.py2) / 2
+      cur.vx += (dcx / dtDetect - cur.vx) * VEL_ALPHA
+      cur.vy += (dcy / dtDetect - cur.vy) * VEL_ALPHA
+      cur.px1 = t.bbox[0]; cur.py1 = t.bbox[1]
+      cur.px2 = t.bbox[2]; cur.py2 = t.bbox[3]
+      cur.seq = t.seq
+      cur.detectAt = nowSec
+    }
+
+    // ---- 每个渲染帧：目标位置沿速度方向前推 ----
+    // 封顶一个送检周期：漏检时不会按旧速度一路飞出去，同时也不会过冲到人的前方
+    const ex = Math.min(EXTRAP_MAX_SEC, Math.max(0, nowSec - cur.detectAt))
+    const ox = cur.vx * ex
+    const oy = cur.vy * ex
+
+    cur.x1 += (t.bbox[0] + ox - cur.x1) * alpha
+    cur.y1 += (t.bbox[1] + oy - cur.y1) * alpha
+    cur.x2 += (t.bbox[2] + ox - cur.x2) * alpha
+    cur.y2 += (t.bbox[3] + oy - cur.y2) * alpha
 
     if (t.kpts && cur.kpts && cur.kpts.length === t.kpts.length && cur.ok) {
       for (let i = 0; i < t.kpts.length; i++) {
@@ -293,15 +338,16 @@ function stepOverlay(now) {
         const ck = cur.kpts[i]
         const good = validKpt(tk)
         if (good && !cur.ok[i]) {
-          // 该关键点首次（或重新）变得可信：直接落位。
+          // 该关键点首次（或重新）变得可信：直接落位（含外推偏移）。
           // 这里绝不能缓动 —— 失效点的坐标可能还停在 (0,0) 占位处，
           // 缓动就会从左上角一路飞回人身上，正是"飞线"的来源。
-          ck[0] = tk[0]
-          ck[1] = tk[1]
+          ck[0] = tk[0] + ox
+          ck[1] = tk[1] + oy
           cur.ok[i] = true
         } else if (good) {
-          ck[0] += (tk[0] - ck[0]) * alpha
-          ck[1] += (tk[1] - ck[1]) * alpha
+          // 骨架与框共用同一份外推偏移整体平移，两者才不会脱节
+          ck[0] += (tk[0] + ox - ck[0]) * alpha
+          ck[1] += (tk[1] + oy - ck[1]) * alpha
         } else {
           // 目标点不可信：只标失效，坐标原地保留，供恢复时无缝续上
           cur.ok[i] = false
@@ -364,7 +410,10 @@ function applyRouteCamera() {
 
 async function start() {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })
+    // 固定请求 30fps：画面节奏稳定，送检侧才能按「每 3 帧送 1 帧」得到恒定的 10fps
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, frameRate: { ideal: 30 } }
+    })
   } catch {
     toast.err('无法访问摄像头，请检查浏览器权限')
     setCamera(false)
@@ -373,6 +422,7 @@ async function start() {
   videoEl.value.srcObject = stream
   running.value = true
   setCamera(true)
+  lastSendAt = 0
   connectDetect()
   loop()
   startOverlayLoop()
@@ -391,6 +441,23 @@ function onVideoMeta() {
   }
 }
 
+/* ---------------- 送检节流：画面 30fps、送检 10fps ----------------
+ * 画面按摄像头出帧率（30fps）呈现，叠加 60fps 的 rAF 平滑层保证视觉连续；
+ * 但送检（上传 + 推理）不必这么频繁 —— 人的动作在 10fps 已足够捕捉，
+ * 而每送一帧都要付 drawImage + JPEG 编码 + base64 + WebSocket 传输的代价。
+ *
+ * 原实现按"每 15 个 rAF 回调送一次"计数，实际送检率会随显示器刷新率漂移
+ * （60Hz 屏约 4fps，144Hz 屏可达 9.6fps），送检节奏不稳定、也无法解释给评委听。
+ * 这里改为按时间片节流：送检帧率恒定，与刷新率彻底解耦。
+ * 周期常量 SEND_INTERVAL_MS 定义在上方（平滑层的外推上限要用到它）。
+ */
+let lastSendAt = 0
+
+// 复用同一块离屏 canvas：原先每次送帧都 createElement 新建画布再丢弃，
+// 持续送帧下会造成稳定的 GC 压力
+let grabCanvas = null
+let grabCtx = null
+
 function loop() {
   rafId = requestAnimationFrame(loop)
   frameCount++
@@ -401,17 +468,30 @@ function loop() {
     frameCount = 0
     lastTick = now
   }
-  if (frames.value % 15 === 0 && wsDetect?.readyState === 1) sendFrame()
+  if (now - lastSendAt >= SEND_INTERVAL_MS && wsDetect?.readyState === 1) {
+    lastSendAt = now
+    sendFrame()
+  }
 }
 
 function sendFrame() {
   const v = videoEl.value
   if (!v || !v.videoWidth) return
-  const c = document.createElement('canvas')
-  c.width = 640
-  c.height = Math.round((640 * v.videoHeight) / v.videoWidth)
-  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height)
-  wsDetect.send(JSON.stringify({ camera_id: cameraId.value || null, image_b64: c.toDataURL('image/jpeg', 0.7) }))
+  if (!grabCanvas) {
+    grabCanvas = document.createElement('canvas')
+    grabCtx = grabCanvas.getContext('2d')
+  }
+  const w = 640
+  const h = Math.round((640 * v.videoHeight) / v.videoWidth)
+  if (grabCanvas.width !== w || grabCanvas.height !== h) {
+    grabCanvas.width = w
+    grabCanvas.height = h
+  }
+  grabCtx.drawImage(v, 0, 0, w, h)
+  wsDetect.send(JSON.stringify({
+    camera_id: cameraId.value || null,
+    image_b64: grabCanvas.toDataURL('image/jpeg', 0.7)
+  }))
   sent.value++
 }
 
@@ -439,6 +519,7 @@ function connectDetect() {
     if (d.error) return
     boxes.value = d.boxes || []
     behaviors.value = d.behaviors || []
+    detectSeq.value++
     faces.value = d.faces || []
     people.value = d.people ?? 0
     inferMs.value = Number(d.infer_ms) || 0
