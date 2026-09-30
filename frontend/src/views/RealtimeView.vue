@@ -81,6 +81,25 @@
             <div class="spacer" />
             <span class="dim tiny">已采集 {{ frames }} 帧 · 送检 {{ sent }} 次</span>
           </div>
+
+          <!-- 判定依据：把模型给出的量化指标摊开，而不是只抛一个黑盒结论。
+               值班老师能看到"为什么判成欺凌"（运动不对称度、退缩、追逃、压制姿态），
+               既方便人工复核，也是答辩时最有说服力的一屏。 -->
+          <div v-if="explain" class="explain">
+            <div class="explain-hd">
+              <span class="tag" :class="`tag--${lvOf[explain.type] || 'low'}`">{{ explain.label }}</span>
+              <span class="dim tiny">置信度 {{ Math.round(explain.conf * 100) }}%</span>
+              <div class="spacer" />
+              <span class="dim tiny">判定依据</span>
+            </div>
+            <div class="explain-rows">
+              <div v-for="r in explain.rows" :key="r.k" class="explain-row">
+                <span class="k">{{ r.k }}</span>
+                <span class="bar"><i :style="{ width: r.pct + '%', background: r.color }" /></span>
+                <span class="v mono">{{ r.v }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -283,6 +302,49 @@ const targets = computed(() => {
 
 /** 实际渲染用的框（平滑后的位置 + 最新一次结果的标签） */
 const renderBoxes = computed(() => Array.from(smoothMap.entries()).map(([key, v]) => ({ key, ...v })))
+
+/** 判定依据：把当前最可疑行为的量化指标摊开展示。
+ *
+ * 只给结论的"黑盒报警"在校园场景里没法用 —— 值班老师必须能自行判断这条报警
+ * 是否可信。这里把判定实际用到的原始特征（互动对称性四项、手腕速度、距离比等）
+ * 连同归一化后的强度条一并展示，让依据可见、可追问、可复核。
+ */
+const EXPLAIN_RANK = { bullying: 0, fight: 1, argue: 2, fall: 3, smoke: 4, crowd: 5 }
+const explain = computed(() => {
+  const list = behaviors.value || []
+  if (!list.length) return null
+  const hit = [...list].sort(
+    (a, b) => (EXPLAIN_RANK[a.event_type] ?? 9) - (EXPLAIN_RANK[b.event_type] ?? 9)
+  )[0]
+  const d = hit && hit.detail
+  if (!d) return null
+
+  // [显示名, 字段, 满量程, 颜色]：满量程用于把数值映射成 0~100 的条长
+  const SPEC = [
+    ['运动不对称', 'asymmetry', 1, '#ff1e56'],
+    ['退缩不对称', 'retreat', 1, '#ff1e56'],
+    ['追逃模式', 'chase', 1, '#ff8a3d'],
+    ['压制姿态', 'suppression', 1, '#ff8a3d'],
+    ['欺凌累积分', 'bully_score', 1, '#2fd6f0'],
+    ['手腕速度', 'wrist_speed', 1.5, '#ffb020'],
+    ['双人距离比', 'dist_ratio', 2, '#9b7bff'],
+    ['手-鼻距离', 'hand_head_ratio', 1.2, '#d7c341']
+  ]
+  const rows = []
+  for (const [label, key, full, color] of SPEC) {
+    if (d[key] === undefined || d[key] === null) continue
+    const v = Number(d[key])
+    if (!Number.isFinite(v)) continue
+    rows.push({
+      k: label,
+      v: v.toFixed(2),
+      pct: Math.min(100, Math.max(0, (v / full) * 100)),
+      color
+    })
+  }
+  if (!rows.length) return null
+  return { type: hit.event_type, label: hit.label, conf: hit.confidence, rows }
+})
 
 function stepOverlay(now) {
   overlayRaf = requestAnimationFrame(stepOverlay)
@@ -759,6 +821,27 @@ onUnmounted(() => stopAll(false))
 </script>
 
 <style scoped>
+/* ---------- 判定依据面板 ----------
+   把判定的量化特征摊开展示：值班老师据此判断报警是否可信，
+   而不是面对一个无法追问的黑盒结论。 */
+.explain {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--line-2);
+}
+.explain-hd { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+.explain-rows { display: flex; flex-direction: column; gap: 6px; }
+.explain-row { display: flex; align-items: center; gap: 9px; font-size: 11.5px; }
+.explain-row .k { width: 72px; flex-shrink: 0; color: var(--tx-3); }
+.explain-row .bar {
+  flex: 1; min-width: 0; height: 5px; border-radius: 3px;
+  background: rgba(122, 162, 220, 0.14); overflow: hidden;
+}
+.explain-row .bar i { display: block; height: 100%; border-radius: 3px; transition: width 0.18s; }
+.explain-row .v { width: 36px; flex-shrink: 0; text-align: right; color: var(--tx-2); }
+
 /* 舞台容器吃掉面板剩余高度；作为尺寸查询容器，让视频能按容器高度反推最大可用宽度，
    因此宽高同时受限时按比例取最大尺寸，既撑满空间又不变形（比例与骨架叠加层一致）。 */
 .stage-wrap {

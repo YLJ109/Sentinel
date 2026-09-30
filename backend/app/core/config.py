@@ -199,6 +199,17 @@ class Settings(BaseSettings):
     # 求救/求助类关键词
     KEYWORD_ALARM: list[str] = ["救命", "救救我", "报警", "老师", "help", "help me", "别打我"]
 
+    # ===== 多模态证据融合（视觉与语音时间窗内互相印证）=====
+    # 视觉与语音在时间上互相印证时，报警可信度显著高于单一模态：
+    # 视觉误判会被语音证伪，语音幻听也会被视觉证伪。这是"如何降低误报"
+    # 最有力的回答，也是本项目区别于单模态方案的核心设计。
+    FUSION_ENABLED: bool = True
+    # 关联时间窗。语音是成句后才转写出来的，从说话到出结果通常有 2~5 秒延迟，
+    # 窗口定得太小（如 3 秒）会让互证几乎永远命中不了，等于功能失效。
+    FUSION_WINDOW_SEC: float = 12.0
+    FUSION_BOOST: float = 0.15           # 双向印证时的置信度加权
+    FUSION_REQUIRE_BOTH: bool = False    # 是否要求视觉与语音同时命中才报警
+
     # ===== 报警策略 =====
     ALARM_MIN_CONFIDENCE: float = 0.55
     ALARM_COOLDOWN_SEC: int = 8

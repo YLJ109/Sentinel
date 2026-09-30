@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -75,6 +76,62 @@ def _bbox_str(bbox) -> str | None:
     return ",".join(f"{float(v):.4f}" for v in bbox)
 
 
+# ---------------------------------------------------------------- 多模态证据融合
+_LEVEL_ORDER = ("low", "medium", "high")
+
+
+def _escalate(level: str) -> str:
+    """把报警级别上调一档（双模态互证时使用）。已是最高级则原样返回。"""
+    try:
+        i = _LEVEL_ORDER.index(level)
+    except ValueError:
+        return level
+    return _LEVEL_ORDER[min(len(_LEVEL_ORDER) - 1, i + 1)]
+
+
+def _window_start(seconds: float) -> datetime:
+    """关联时间窗的起点（naive UTC，与库内存储口径一致）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=seconds)
+
+
+async def _recent_speech_keywords(db: AsyncSession, camera_id: int | None,
+                                  window_sec: float) -> list[str]:
+    """同点位最近若干秒内命中的语音关键词（去重）。"""
+    rows = (await db.execute(
+        select(ChatLog.hit_keywords)
+        .where(ChatLog.camera_id == camera_id)
+        .where(ChatLog.created_at >= _window_start(window_sec))
+        .where(ChatLog.hit_keywords.isnot(None))
+        .order_by(ChatLog.id.desc())
+        .limit(20)
+    )).scalars().all()
+    words: list[str] = []
+    for raw in rows:
+        for w in str(raw).split("、"):
+            w = w.strip()
+            if w and w not in words:
+                words.append(w)
+    return words
+
+
+async def _recent_visual_events(db: AsyncSession, camera_id: int | None,
+                                window_sec: float) -> list[str]:
+    """同点位最近若干秒内的霸凌类视觉事件标签（去重）。"""
+    rows = (await db.execute(
+        select(DetectionEvent.label)
+        .where(DetectionEvent.camera_id == camera_id)
+        .where(DetectionEvent.created_at >= _window_start(window_sec))
+        .where(DetectionEvent.is_bullying.is_(True))
+        .order_by(DetectionEvent.id.desc())
+        .limit(20)
+    )).scalars().all()
+    labels: list[str] = []
+    for lb in rows:
+        if lb and lb not in labels:
+            labels.append(str(lb))
+    return labels
+
+
 # ---------------------------------------------------------------- 视觉
 async def process_frame(
     db: AsyncSession,
@@ -115,13 +172,33 @@ async def process_frame(
         if await _in_cooldown(camera_id, "video"):
             continue
 
+        # ---- 多模态证据融合 ----
+        # 若同点位近期的语音转写也命中了关键词，两条独立链路互为印证，
+        # 报警可信度显著提高；对应的，级别只升不降。
+        speech_words: list[str] = []
+        if settings.FUSION_ENABLED:
+            speech_words = await _recent_speech_keywords(db, camera_id, settings.FUSION_WINDOW_SEC)
+        multimodal = bool(speech_words)
+
+        conf = float(hit.confidence)
+        level = str(meta["level"])
+        if multimodal:
+            conf = min(0.99, conf + settings.FUSION_BOOST)
+            level = _escalate(level)
+
         frame_path = ev.save_frame(frame_bgr, prefix=f"alarm_{hit.event_type}")
         detail_txt = "、".join(f"{k}={v}" for k, v in list(hit.detail.items())[:6])
+        reason = f"视觉行为检测：{meta['label']}（置信度 {conf:.2f}"
+        if multimodal:
+            reason += f"；语音同时命中关键词：{'、'.join(speech_words[:4])}"
+        if detail_txt:
+            reason += f"；{detail_txt}"
+        reason += "）"
+
         alarm = AlarmRecord(
             camera_id=camera_id,
-            level=str(meta["level"]),
-            reason=f"视觉行为检测：{meta['label']}（置信度 {hit.confidence:.2f}"
-                   + (f"；{detail_txt}" if detail_txt else "") + "）",
+            level=level,
+            reason=reason,
             source="video",
             status="pending",
             evidence_paths=ev.register_evidence_paths([frame_path]),
@@ -142,9 +219,11 @@ async def process_frame(
             "reason": alarm.reason,
             "event_type": hit.event_type,
             "label": str(meta["label"]),
-            "confidence": float(hit.confidence),
+            "confidence": conf,
             "track_ids": hit.track_ids,
             "evidence": [frame_path],
+            "multimodal": multimodal,
+            "speech_keywords": speech_words[:4],
             "created_at": alarm.created_at.isoformat() if alarm.created_at else None,
         }
         # 外发通知不阻塞检测主流程
@@ -189,12 +268,24 @@ async def process_speech(
     triggered: dict[str, Any] | None = None
 
     if level and not await _in_cooldown(camera_id, "audio"):
+        # ---- 多模态证据融合（反向：语音报警时回查同期视觉证据）----
+        visual_labels: list[str] = []
+        if settings.FUSION_ENABLED:
+            visual_labels = await _recent_visual_events(db, camera_id, settings.FUSION_WINDOW_SEC)
+        multimodal = bool(visual_labels)
+        if multimodal:
+            level = _escalate(str(level))
+
         keyword_txt = "、".join(summary["keywords"])
+        reason = f"语音关键词命中：{keyword_txt}｜“{segment.text}”"
+        if multimodal:
+            reason += f"；同期视觉亦检出：{'、'.join(visual_labels[:3])}"
+
         path = ev.save_transcript(segment.text, prefix=f"speech_{int(time.time() * 1000)}")
         alarm = AlarmRecord(
             camera_id=camera_id,
             level=str(level),
-            reason=f"语音关键词命中：{keyword_txt}｜“{segment.text}”",
+            reason=reason,
             source="audio",
             status="pending",
             evidence_paths=ev.register_evidence_paths([path]),
@@ -216,6 +307,8 @@ async def process_speech(
             "hit_keywords": summary["keywords"],
             "confidence": segment.confidence,
             "evidence": [path],
+            "multimodal": multimodal,
+            "visual_labels": visual_labels[:3],
             "created_at": alarm.created_at.isoformat() if alarm.created_at else None,
         }
         asyncio.create_task(notify.notify_alarm(triggered))
