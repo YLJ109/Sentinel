@@ -1,16 +1,17 @@
 """报警记录管理（取证与处置核心）。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import BEHAVIOR_LABELS
 from app.core.db import get_db
 from app.core.deps import get_current_user, require_role
 from app.core.timeutil import parse_dt_query
-from app.models import AlarmRecord, User
+from app.models import AlarmRecord, DetectionEvent, User
 from app.schemas import AlarmOut, AlarmPage, AlarmUpdate
 
 router = APIRouter(prefix="/api/alarms", tags=["报警"])
@@ -149,3 +150,102 @@ async def bulk_update_status(
             rec.resolved_at = now
     await db.commit()
     return {"updated": len(rows)}
+
+
+# 复核建议对应的可调参数：把统计结论直接映射到参数名，
+# 否则"误报率高"只是一句结论，使用者不知道该改什么。
+_THRESHOLD_HINT: dict[str, str] = {
+    "bullying": "BULLY_SCORE_THRESHOLD（提高可减少误报）",
+    "fight": "FIGHT_WRIST_SPEED 或 FIGHT_MIN_FRAMES（提高可减少误报）",
+    "argue": "ARGUE_MIN_FRAMES（提高）或 ARGUE_DIST_RATIO（收紧）",
+    "smoke": "SMOKE_MIN_FRAMES（提高）或 SMOKE_HAND_HEAD_RATIO（收紧）",
+    "fall": "FALL_MIN_FRAMES（提高可减少误报）",
+    "crowd": "CROWD_MIN_PEOPLE（提高可减少误报）",
+}
+
+# 由中文标签反查事件类型：历史报警没有关联 event_id，只能从 reason 文本里解析
+_LABEL_TO_TYPE: dict[str, str] = {str(v["label"]): k for k, v in BEHAVIOR_LABELS.items()}
+
+
+# 路径刻意用两段（/review/summary）而不是 /review-summary：
+# 单段会被前面定义的 GET /{alarm_id} 抢先匹配，导致 alarm_id 转换失败返回 422。
+@router.get("/review/summary")
+async def review_summary(
+    days: int = Query(30, ge=1, le=365, description="回溯天数"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """复核闭环：把人工复核结果汇总成可行动的结论。
+
+    闭环的价值在「报警 → 人工复核 → 统计 → 反向指导阈值调整」。
+    没有这一步，误报率永远是个说不清的数字，判定阈值也无从迭代 ——
+    而这恰恰是评审一定会追问的「你怎么知道系统准不准」的唯一诚实答案。
+    """
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    rows = (await db.execute(
+        select(AlarmRecord.feedback_label, AlarmRecord.status,
+               DetectionEvent.event_type, AlarmRecord.reason)
+        .outerjoin(DetectionEvent, AlarmRecord.event_id == DetectionEvent.id)
+        .where(AlarmRecord.created_at >= since)
+    )).all()
+
+    # total 必须取实际返回的报警条数：漏掉这一步会让它恒为 0，
+    # 于是 review_rate 也算成 0，整个复核率指标失去意义
+    total = len(rows)
+    reviewed = confirmed = false_pos = other = 0
+    per_type: dict[str, dict[str, int]] = {}
+
+    for feedback, status, etype, reason in rows:
+        if not etype and reason:
+            for label, t in _LABEL_TO_TYPE.items():
+                if label in reason:
+                    etype = t
+                    break
+        etype = etype or "unknown"
+
+        bucket = per_type.setdefault(etype, {"total": 0, "reviewed": 0,
+                                             "confirmed": 0, "false_positive": 0, "other": 0})
+        bucket["total"] += 1
+        if status in ("resolved", "ignored") or feedback:
+            bucket["reviewed"] += 1
+            reviewed += 1
+        if feedback == "confirmed":
+            bucket["confirmed"] += 1
+            confirmed += 1
+        elif feedback == "false_positive":
+            bucket["false_positive"] += 1
+            false_pos += 1
+        elif feedback:
+            bucket["other"] += 1
+            other += 1
+
+    by_type = []
+    for etype, b in sorted(per_type.items(), key=lambda kv: -kv[1]["total"]):
+        label = str(BEHAVIOR_LABELS.get(etype, {}).get("label", etype))
+        judged = b["confirmed"] + b["false_positive"]
+        rate = round(b["confirmed"] / judged, 3) if judged else None
+        advice = None
+        # 样本少于 5 条不下结论，避免用一两条复核就调整全局阈值
+        if judged >= 5 and rate is not None:
+            if rate < 0.5:
+                advice = (f"确认率仅 {rate:.0%}，误报偏多；"
+                          f"建议调整 {_THRESHOLD_HINT.get(etype, '判定阈值')}")
+            elif rate >= 0.9:
+                advice = f"确认率高达 {rate:.0%}，可适当放宽阈值以提高召回"
+        by_type.append({
+            "event_type": etype, "label": label,
+            "total": b["total"], "reviewed": b["reviewed"],
+            "confirmed": b["confirmed"], "false_positive": b["false_positive"],
+            "confirm_rate": rate, "advice": advice,
+        })
+
+    return {
+        "window_days": days,
+        "total": total,
+        "reviewed": reviewed,
+        "review_rate": round(reviewed / total, 3) if total else 0.0,
+        "confirmed": confirmed,
+        "false_positive": false_pos,
+        "other": other,
+        "by_type": by_type,
+    }

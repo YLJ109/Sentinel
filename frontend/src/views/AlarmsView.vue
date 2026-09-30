@@ -26,6 +26,23 @@
         <button v-if="dateFrom || dateTo" class="btn btn--xs btn--ghost" @click="clearRange">清除日期</button>
       </div>
 
+      <!-- 复核概览：把「报警之后有没有人复核、复核结果如何」摆到台面上。
+           缺了这一环，误报率永远是个说不清的数字，判定阈值也无从迭代。 -->
+      <div v-if="review.total" class="review-bar">
+        <span class="rb-item">近 {{ review.window_days }} 天报警 <b class="mono">{{ review.total }}</b></span>
+        <span class="rb-sep" />
+        <span class="rb-item">
+          已复核 <b class="mono">{{ review.reviewed }}</b>
+          <span class="dim tiny">（{{ Math.round((review.review_rate || 0) * 100) }}%）</span>
+        </span>
+        <span class="rb-sep" />
+        <span class="rb-item rb-warn">误报 <b class="mono">{{ review.false_positive }}</b></span>
+        <div class="spacer" />
+        <span v-if="reviewAdvice" class="rb-advice" :title="reviewAdvice">
+          <Icon name="pulse" />{{ reviewAdvice }}
+        </span>
+      </div>
+
       <!-- 批量操作条 -->
       <div v-if="selected.length" class="bulk-bar">
         <Icon name="check" />
@@ -240,6 +257,8 @@ import api, { dataUrl, downloadFile } from '@/api'
 const route = useRoute()
 
 const rows = ref([])
+// 复核统计：来自 /api/alarms/review/summary
+const review = reactive({ window_days: 30, total: 0, reviewed: 0, review_rate: 0, false_positive: 0, by_type: [] })
 const total = ref(0)
 const page = ref(0)
 const size = ref(50)
@@ -318,6 +337,20 @@ function localDayIso(dateStr, end = false) {
   const d = new Date(`${dateStr}T${end ? '23:59:59.999' : '00:00:00'}`)
   return Number.isNaN(d.getTime()) ? '' : d.toISOString()
 }
+
+async function loadReview() {
+  try {
+    Object.assign(review, await api.get('/api/alarms/review/summary?days=30'))
+  } catch { /* 静默 */ }
+}
+
+// 取最需要关注的一条建议：确认率最低（即误报最多）的那一类
+const reviewAdvice = computed(() => {
+  const list = (review.by_type || []).filter((r) => r.advice)
+  if (!list.length) return ''
+  const worst = [...list].sort((a, b) => (a.confirm_rate ?? 1) - (b.confirm_rate ?? 1))[0]
+  return worst.advice
+})
 
 async function load() {
   loading.value = true
@@ -529,6 +562,7 @@ onMounted(async () => {
   const focus = Number(route.query.focus)
   if (focus) status.value = ''
   await load()
+  loadReview()
   if (focus) await focusAlarm(focus)
 })
 
@@ -539,6 +573,24 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ---------- 复核概览条 ---------- */
+.review-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-inset);
+  font-size: 12px; color: var(--tx-2);
+}
+.review-bar b { color: var(--tx-1); }
+.rb-sep { width: 1px; height: 12px; background: var(--line-2); flex-shrink: 0; }
+.rb-warn b { color: #ff8fa3; }
+/* 建议可能较长：单行省略 + title 悬浮看全文，避免撑破这一行 */
+.rb-advice {
+  display: flex; align-items: center; gap: 6px;
+  max-width: 46%; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #ffc861;
+}
 /* .filter-bar / .date-input / .bulk-bar / .pager / .flip 已收敛到全局 style.css；
    此处仅保留本页表格列的宽度差异 */
 .ellip { max-width: 360px; }
