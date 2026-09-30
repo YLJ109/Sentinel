@@ -26,6 +26,9 @@ class FaceDetector:
     def __init__(self) -> None:
         self._yolo = None
         self._cascade = None
+        self._yunet = None
+        self._yunet_path: Path | None = None
+        self._yunet_size: tuple[int, int] | None = None
         self._backend = ""
         self._error = ""
         self._ready = False
@@ -45,12 +48,44 @@ class FaceDetector:
                     self._backend = "yolo"
                     log.info("人脸检测已启用：YOLO 权重 %s", path.name)
                     return
-                log.warning("已配置人脸模型但权重不存在：%s，回落 OpenCV 级联", name)
+                log.warning("已配置人脸模型但权重不存在：%s，改用 YuNet", name)
             except Exception as e:
                 self._error = str(e)
-                log.warning("人脸模型加载失败，回落 OpenCV 级联：%s", e)
+                log.warning("人脸模型加载失败，改用 YuNet：%s", e)
+
+        # 未配置 YOLO 人脸权重时优先用 YuNet：OpenCV 自带 DNN 接口、零新增依赖，
+        # 精度与速度都明显优于 Haar 级联
+        if self._load_yunet():
+            self._backend = "yunet"
+            log.info("人脸检测已启用：OpenCV YuNet（%s）", self._yunet_path.name)
+            return
 
         self._load_cascade()
+
+    def _load_yunet(self) -> bool:
+        """准备 YuNet 权重路径（真正的检测器在首次检测时按帧尺寸惰性创建）。
+
+        YuNet 是 OpenCV 自带的 DNN 人脸检测器：接口就在 cv2 内、无需新增 pip 依赖，
+        权重仅约 230KB。相比 Haar 级联，官方基准下速度快约 5 倍，
+        且侧脸与遮挡场景的召回明显更好。
+        """
+        import cv2
+
+        if not hasattr(cv2, "FaceDetectorYN"):
+            self._error = "当前 OpenCV 版本不支持 FaceDetectorYN，回落 Haar"
+            return False
+        name = (settings.FACE_YUNET_MODEL or "").strip()
+        if not name:
+            return False
+        try:
+            path = resolve_weights(name)
+        except Exception as e:
+            self._error = str(e)
+            return False
+        if not path.exists():
+            return False
+        self._yunet_path = path
+        return True
 
     def _load_cascade(self) -> None:
         import cv2
@@ -72,14 +107,14 @@ class FaceDetector:
     @property
     def ready(self) -> bool:
         self._ensure()
-        return self._backend in ("yolo", "haar")
+        return self._backend in ("yolo", "yunet", "haar")
 
     def status(self) -> dict:
         self._ensure()
         return {
             "enabled": settings.ENABLE_FACE,
             "backend": self._backend,
-            "ready": self._backend in ("yolo", "haar") and settings.ENABLE_FACE,
+            "ready": self._backend in ("yolo", "yunet", "haar") and settings.ENABLE_FACE,
             "error": self._error,
         }
 
@@ -91,6 +126,8 @@ class FaceDetector:
         self._ensure()
         if self._backend == "yolo":
             return self._detect_yolo(frame)
+        if self._backend == "yunet":
+            return self._detect_yunet(frame)
         if self._backend == "haar":
             return self._detect_haar(frame)
         return []
@@ -114,6 +151,36 @@ class FaceDetector:
                          float(xyxy[i][2]) / w, float(xyxy[i][3]) / h],
                 "confidence": round(float(confs[i]), 3),
                 "backend": "yolo",
+            })
+        return out
+
+    def _detect_yunet(self, frame: np.ndarray) -> list[dict]:
+        """YuNet 推理。检测器绑定输入尺寸，因此按帧尺寸惰性创建并复用。"""
+        import cv2
+
+        h, w = frame.shape[:2]
+        if self._yunet is None or self._yunet_size != (w, h):
+            self._yunet = cv2.FaceDetectorYN.create(
+                str(self._yunet_path), "", (w, h),
+                score_threshold=settings.FACE_CONF,
+                nms_threshold=0.3,
+                top_k=max(1, settings.FACE_MAX_FACES),
+            )
+            self._yunet_size = (w, h)
+
+        _, faces = self._yunet.detect(frame)
+        if faces is None:
+            return []
+
+        out: list[dict] = []
+        for f in faces[: settings.FACE_MAX_FACES]:
+            x, y, bw, bh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
+            # YuNet 每行 15 个值：前 4 个是框（x, y, w, h），最后一个是置信度
+            out.append({
+                "bbox": [max(0.0, x / w), max(0.0, y / h),
+                         min(1.0, (x + bw) / w), min(1.0, (y + bh) / h)],
+                "confidence": round(float(f[14]), 3),
+                "backend": "yunet",
             })
         return out
 

@@ -88,9 +88,14 @@ class Settings(BaseSettings):
 
     # ===== 人脸检测（仅定位人脸框，不做人脸识别/比对）=====
     ENABLE_FACE: bool = True
-    # 留空：使用 OpenCV 自带 Haar 级联（随 opencv 安装、离线可用）；
-    # 填入开源 YOLO 人脸权重名（放进 backend/models/）即自动升级为模型检测
+    # 三级优先，逐级回落，保证任何环境下都开箱可用：
+    #   ① FACE_MODEL 填了 YOLO 人脸权重名 → 用 YOLO（精度最高、复用同一 GPU）
+    #   ② 留空 → 自动使用 YuNet（OpenCV 自带 DNN 接口，权重约 230KB，
+    #      官方基准下速度约为 Haar 的 5 倍，侧脸/遮挡召回也更好）
+    #   ③ YuNet 权重缺失 → 回落 OpenCV Haar 级联（随 opencv 安装，完全离线）
     FACE_MODEL: str = ""
+    # YuNet 权重文件名（放在 backend/models/ 下）。换其他版本时改这里即可
+    FACE_YUNET_MODEL: str = "face_detection_yunet_2023mar.onnx"
     FACE_CONF: float = 0.45
     FACE_MIN_RATIO: float = 0.06         # 最小人脸边长占画面短边比例（Haar 用）
     FACE_MAX_FACES: int = 30             # 单帧最多标注的人脸数
